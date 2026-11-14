@@ -1,0 +1,96 @@
+#!/usr/bin/python3
+"""Start one SSHX process per VPS. Its capability URL stays in container tmpfs."""
+import fcntl
+import os
+import re
+import signal
+import subprocess
+import sys
+
+DIR = "/tmp/fier-sshx"
+PID = DIR + "/sshx.pid"
+URL = DIR + "/session.url"
+ERR = DIR + "/session.err"
+VALID_ID = re.compile(r"fier-[a-f0-9]{12}\Z")
+VALID_URL = re.compile(r"https://sshx\.io/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+\n?")
+
+
+def alive(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return b"sshx" in handle.read(4096)
+    except OSError:
+        return False
+
+
+def read_pid() -> int:
+    try:
+        with open(PID) as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def start(instance_id: str) -> None:
+    if not VALID_ID.fullmatch(instance_id) or os.environ.get("FIER_VPS_ID") != instance_id:
+        raise SystemExit(1)
+    pid = read_pid()
+    if pid > 1 and alive(pid):
+        return
+    for path in (URL, ERR, PID):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    with open(URL, "w", opener=lambda p, f: os.open(p, f, 0o600)) as out, open(
+        ERR, "w", opener=lambda p, f: os.open(p, f, 0o600)
+    ) as err:
+        process = subprocess.Popen(
+            ["/usr/local/bin/sshx", "--quiet", "--shell", "/bin/bash", "--name", instance_id],
+            stdin=subprocess.DEVNULL, stdout=out, stderr=err,
+            start_new_session=True, cwd="/home/fier",
+            env={**os.environ, "SHELL": "/bin/bash", "RUST_LOG": "error"},
+        )
+    with open(PID, "w", opener=lambda p, f: os.open(p, f, 0o600)) as handle:
+        handle.write(str(process.pid))
+
+
+def stop() -> None:
+    pid = read_pid()
+    if pid > 1 and alive(pid):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    for path in (URL, ERR, PID):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
+def main() -> None:
+    os.umask(0o077)
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    with open(DIR + "/lock", "a", opener=lambda p, f: os.open(p, f, 0o600)) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        action = sys.argv[1] if len(sys.argv) > 1 else ""
+        if action == "start" and len(sys.argv) == 3:
+            start(sys.argv[2])
+        elif action == "stop":
+            stop()
+        elif action == "url":
+            pid = read_pid()
+            if pid > 1 and alive(pid) and os.path.exists(URL):
+                with open(URL) as handle:
+                    value = handle.read(1025)
+                if VALID_URL.fullmatch(value):
+                    sys.stdout.write(value.strip())
+                    return
+            raise SystemExit(1)
+        else:
+            raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()

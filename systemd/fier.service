@@ -1,0 +1,32 @@
+[Unit]
+Description=FIER Discord VPS Manager
+Wants=network-online.target docker.service
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=fier
+Group=fier
+SupplementaryGroups=docker
+WorkingDirectory=/opt/fier
+EnvironmentFile=/etc/fier/fier.env
+Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/fier/.venv/bin/python -m fier run
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+UMask=0077
+# The narrow root-owned sudo helper must create host-visible loop mounts and
+# access the Docker socket. Namespace/capability sandboxing here would break
+# those host operations. Docker-group access is already host-root-equivalent.
+NoNewPrivileges=false
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=fier
+
+[Install]
+WantedBy=multi-user.target
