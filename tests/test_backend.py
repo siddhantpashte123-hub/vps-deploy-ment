@@ -91,3 +91,17 @@ def test_refuse_unmanaged_container(settings):
     backend = DockerBackend(settings, client)
     with pytest.raises(BackendError, match="not managed"):
         backend.get("fier-a1b2c3d4e5f6")
+
+
+def test_preflight_reports_directory_fallback(settings):
+    client = Mock()
+    network = Mock()
+    network.name = settings.network
+    network.attrs = {"Labels": {"io.github.fier.managed": "true"}}
+    client.networks.list.return_value = [network]
+    client.info.return_value = {"ServerVersion": "29.1.3"}
+    backend = DockerBackend(settings, client)
+    with patch.object(backend, "_helper", side_effect=["ok", "directory"]):
+        info = backend.preflight()
+    assert info["fier_storage_mode"] == "directory"
+    assert backend.storage_mode == "directory"

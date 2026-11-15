@@ -78,7 +78,7 @@ def write_env(path: Path, updates: dict[str, str]) -> None:
             os.unlink(temporary)
 
 
-def setup(env_path: Path, template: Path | None = None) -> None:
+def setup(env_path: Path, template: Path | None = None, keep_existing: bool = False) -> None:
     if not env_path.exists() and template and template.exists():
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text(template.read_text())
@@ -86,15 +86,24 @@ def setup(env_path: Path, template: Path | None = None) -> None:
     from dotenv import dotenv_values
 
     current = dotenv_values(env_path).get("DISCORD_TOKEN") or ""
-    print("\nFIER — Discord bot token")
-    print("Developer Portal → your application → Bot → Reset Token → Copy.")
-    print("Also enable MESSAGE CONTENT INTENT on that Bot page.")
-    print("Input is hidden. The token is stored in a root-readable mode-0600 file, never in Git.\n")
-    token = getpass.getpass(
-        "Paste bot token (Enter keeps existing token): " if current else "Paste bot token: "
-    ).strip()
-    if not token and current:
+    if keep_existing:
+        if not current:
+            raise FierError("No existing token found. Run setup without --keep-existing-token.")
         token = current
+        print("Reusing existing Discord token from the environment file.")
+    else:
+        print("\nFIER — Discord bot token")
+        print("Developer Portal → your application → Bot → Reset Token → Copy.")
+        print("Also enable MESSAGE CONTENT INTENT on that Bot page.")
+        print(
+            "Input is hidden. The token is stored in a root-readable mode-0600 file, "
+            "never in Git.\n"
+        )
+        token = getpass.getpass(
+            "Paste bot token (Enter keeps existing token): " if current else "Paste bot token: "
+        ).strip()
+        if not token and current:
+            token = current
     data = validate_token(token)
     write_env(env_path, {"DISCORD_TOKEN": token, "FIER_CLIENT_ID": str(data["id"])})
     print(f"Token validated for {data.get('username', 'bot')}. Saved securely to {env_path}.")
@@ -133,12 +142,21 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="fier", description="FIER Discord VPS manager")
     parser.add_argument("command", choices=["run", "setup", "doctor", "version"])
     parser.add_argument("--env-file", type=Path, default=Path("/etc/fier/fier.env"))
+    parser.add_argument(
+        "--keep-existing-token",
+        action="store_true",
+        help="with setup: validate and reuse the saved token without prompting",
+    )
     args = parser.parse_args()
     try:
         if args.command == "version":
             print(__version__)
         elif args.command == "setup":
-            setup(args.env_file, Path(__file__).resolve().parent.parent / ".env.example")
+            setup(
+                args.env_file,
+                Path(__file__).resolve().parent.parent / ".env.example",
+                keep_existing=args.keep_existing_token,
+            )
         elif args.command == "run":
             run()
         else:
@@ -152,8 +170,14 @@ def main() -> None:
             finally:
                 backend.close()
             print(
-                f"Docker OK: {info.get('ServerVersion')} · image {settings.image} · disk helper OK"
+                f"Docker OK: {info.get('ServerVersion')} · image {settings.image} · "
+                f"disk helper OK · storage={info.get('fier_storage_mode', 'unknown')}"
             )
+            if info.get("fier_storage_mode") == "directory":
+                print(
+                    "Note: loop mounts are unavailable on this host; VPS homes use directory "
+                    "storage. Disk sizes are reserved budgets, not hard filesystem quotas."
+                )
     except FierError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None

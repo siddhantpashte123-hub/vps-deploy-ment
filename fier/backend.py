@@ -44,6 +44,7 @@ class DockerBackend:
 
     def __init__(self, settings: Settings, client: Any = None):
         self.settings = settings
+        self.storage_mode = "unknown"
         if client is None:
             try:
                 client = docker.from_env(timeout=120)
@@ -103,6 +104,11 @@ class DockerBackend:
                 if network.attrs.get("Labels", {}).get(LABEL) != "true":
                     raise BackendError("FIER_NETWORK exists but is not managed by FIER.")
             self._helper("check", "fier-000000000000")
+            mode = self._helper("probe", "fier-000000000000")
+            if mode not in {"loop", "directory"}:
+                raise BackendError("Disk helper returned an unknown storage mode.")
+            self.storage_mode = mode
+            info["fier_storage_mode"] = mode
             return info
         except ImageNotFound as exc:
             raise BackendError("VPS image is missing. Re-run install.sh to build it.") from exc

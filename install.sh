@@ -67,6 +67,9 @@ tar -C "$SOURCE_DIR" --exclude='__pycache__' --exclude='.pytest_cache' --exclude
 chown -R root:root "$APP_DIR"
 python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/python" -m pip install --disable-pip-version-check -q -r "$APP_DIR/requirements.txt"
+# The installer runs with umask 077; the systemd service runs as `fier` and
+# must be able to traverse/read the root-owned application and virtualenv.
+chmod -R a+rX "$APP_DIR"
 
 say "Building the Ubuntu VPS image (first run may take a few minutes)"
 cd "$APP_DIR"
@@ -81,13 +84,18 @@ sudo -u fier sudo -n /usr/local/libexec/fier-volume check fier-000000000000 \
   || die "The unprivileged bot cannot use the disk helper."
 
 say "Connect your Discord bot"
-"$APP_DIR/.venv/bin/python" -m fier setup --env-file "$ENV_FILE"
+SETUP_ARGS=(setup --env-file "$ENV_FILE")
+if [[ ${FIER_REPAIR:-0} == 1 ]]; then
+  SETUP_ARGS+=(--keep-existing-token)
+fi
+"$APP_DIR/.venv/bin/python" -m fier "${SETUP_ARGS[@]}"
 chmod 0600 "$ENV_FILE"
 chown root:root "$ENV_FILE"
 "$APP_DIR/.venv/bin/python" -m fier doctor --env-file "$ENV_FILE"
 
 say "Starting FIER automatically"
 install -o root -g root -m 0644 systemd/fier.service "/etc/systemd/system/$SERVICE"
+chmod -R a+rX "$APP_DIR"
 systemctl daemon-reload
 systemctl enable "$SERVICE"
 START_TIME="$(date -u '+%Y-%m-%d %H:%M:%S')"
