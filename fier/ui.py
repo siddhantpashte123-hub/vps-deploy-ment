@@ -1,15 +1,40 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import discord
 
 from .errors import FierError, UserError
-from .models import Actor, Instance
+from .models import Actor, Instance, Specs
 
 log = logging.getLogger(__name__)
-COLOR = 0xF0523B
-STATUS_ICON = {"running": "🟢", "stopped": "⚪", "error": "🔴"}
+
+COLOR = 0x8B5CF6
+ACCENT = 0x22D3EE
+SUCCESS = 0x10B981
+DANGER = 0xEF4444
+MUTED = 0x64748B
+STATUS_ICON = {
+    "running": "🟢",
+    "stopped": "⚪",
+    "error": "🔴",
+    "provisioning": "🚀",
+    "reinstalling": "♻️",
+    "deleting": "🗑️",
+}
+BANNER_PATH = Path(__file__).resolve().parent.parent / "assets" / "fier-banner.png"
+BANNER_FILENAME = "fier-banner.png"
+
+DEPLOY_STAGES = [
+    ("validate", "Validate plan", 5),
+    ("reserve", "Reserve resources", 15),
+    ("storage", "Prepare persistent disk", 50),
+    ("container", "Create root container", 60),
+    ("boot", "Boot & health-check", 85),
+    ("ready", "Finalize inventory", 98),
+    ("online", "Bring online", 100),
+]
 
 
 def error_text(exc: Exception) -> str:
@@ -22,35 +47,115 @@ def error_text(exc: Exception) -> str:
     return "Something went wrong. The host administrator can check `journalctl -u fier`."
 
 
-def instance_embed(instance: Instance) -> discord.Embed:
-    icon = STATUS_ICON.get(instance.status, "🟡")
-    embed = discord.Embed(
-        title=f"FIER · {instance.id}",
-        description=f"{icon} **{instance.status.upper()}**\nUbuntu 24.04 development container",
-        color=COLOR if instance.status != "error" else 0xD83C3E,
-    )
-    embed.add_field(name="RAM", value=f"{instance.ram_gb} GiB")
-    embed.add_field(name="CPU", value=f"{instance.cpu} core(s)")
-    embed.add_field(name="Disk", value=f"{instance.disk_gb} GiB")
-    embed.add_field(name="Owner", value=f"<@{instance.owner_id}>", inline=False)
-    embed.add_field(
-        name="Terminal",
-        value="Click **SSHX** for a private browser-terminal link. No public SSH port is exposed.",
-        inline=False,
-    )
-    embed.set_footer(text="Start/Stop preserve files • Reinstall/Delete destroy files")
+def banner_file() -> discord.File | None:
+    if BANNER_PATH.is_file():
+        return discord.File(BANNER_PATH, filename=BANNER_FILENAME)
+    return None
+
+
+def _brand(embed: discord.Embed) -> discord.Embed:
+    embed.set_footer(text="FIER • Private Cloud Console")
+    if BANNER_PATH.is_file():
+        embed.set_image(url=f"attachment://{BANNER_FILENAME}")
     return embed
 
 
-def empty_embed() -> discord.Embed:
-    return discord.Embed(
-        title="FIER · Your VPSes",
-        description=(
-            "No VPSes yet. Deploy one with:\n```text\n!deploy 1 1 1\n```\n"
-            "RAM (GiB) · CPU cores · disk (GiB)"
-        ),
-        color=COLOR,
+def instance_embed(instance: Instance) -> discord.Embed:
+    icon = STATUS_ICON.get(instance.status, "🟡")
+    color = (
+        SUCCESS if instance.status == "running" else DANGER if instance.status == "error" else COLOR
     )
+    embed = discord.Embed(
+        title=f"⚡ FIER · {instance.id}",
+        description=(
+            f"{icon} **{instance.status.upper()}**  ·  `UBUNTU 24.04`\n"
+            "🔐 **Root terminal** · persistent home · isolated container"
+        ),
+        color=color,
+    )
+    embed.add_field(name="🧠 Memory", value=f"**{instance.ram_gb}** GiB", inline=True)
+    embed.add_field(name="⚙️ Compute", value=f"**{instance.cpu}** vCPU", inline=True)
+    embed.add_field(name="💾 Storage", value=f"**{instance.disk_gb}** GiB", inline=True)
+    embed.add_field(name="👤 Owner", value=f"<@{instance.owner_id}>", inline=True)
+    embed.add_field(name="🌐 Network", value="Private bridge", inline=True)
+    embed.add_field(
+        name="🕒 Updated", value=f"<t:{int(_timestamp(instance.updated_at))}:R>", inline=True
+    )
+    embed.add_field(
+        name="💻 Terminal",
+        value=(
+            "Press **SSHX** for a private **root** browser terminal. No public SSH port is exposed."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Start/Stop preserve files • Reinstall/Delete destroy files")
+    if BANNER_PATH.is_file():
+        embed.set_image(url=f"attachment://{BANNER_FILENAME}")
+    return embed
+
+
+def _timestamp(value: str) -> float:
+    from datetime import datetime
+
+    try:
+        return datetime.fromisoformat(value).timestamp()
+    except ValueError:
+        return 0
+
+
+def empty_embed() -> discord.Embed:
+    return _brand(
+        discord.Embed(
+            title="⚡ FIER · Your private cloud",
+            description=(
+                "No VPSes yet. Launch your first root instance:\n"
+                "```text\n!deploy 1 1 1\n```\n"
+                "`RAM GiB` · `CPU cores` · `Disk GiB`"
+            ),
+            color=COLOR,
+        )
+    )
+
+
+def _bar(percent: int, width: int = 12) -> str:
+    percent = max(0, min(100, percent))
+    filled = round(width * percent / 100)
+    return "█" * filled + "░" * (width - filled)
+
+
+def deploy_progress_embed(specs: Specs, stage: str, percent: int) -> discord.Embed:
+    percent = max(0, min(100, percent))
+    current = next((label for key, label, _ in DEPLOY_STAGES if key == stage), "Working")
+    pipeline = []
+    for key, label, threshold in DEPLOY_STAGES:
+        if percent >= 100 or threshold < percent:
+            pipeline.append(f"✅ {label}")
+        elif key == stage:
+            pipeline.append(f"🔄 **{label}**")
+        else:
+            pipeline.append(f"⬜ {label}")
+    embed = discord.Embed(
+        title="🚀 FIER · Deploying your VPS",
+        description=(
+            f"`{_bar(percent)}` **{percent}%**\n"
+            f"Current phase: **{current}**\n\n" + "\n".join(pipeline)
+        ),
+        color=ACCENT if percent < 100 else SUCCESS,
+    )
+    embed.add_field(name="📦 Plan", value=specs.label(), inline=False)
+    embed.add_field(name="🔐 Access", value="Root SSHX terminal", inline=True)
+    embed.add_field(name="🧩 OS", value="Ubuntu 24.04", inline=True)
+    return _brand(embed)
+
+
+def deploy_failure_embed(specs: Specs, message: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="🛑 FIER · Deployment failed",
+        description=message,
+        color=DANGER,
+    )
+    embed.add_field(name="📦 Plan", value=specs.label(), inline=False)
+    return _brand(embed)
 
 
 class ConfirmView(discord.ui.View):
@@ -148,10 +253,11 @@ class ManageView(discord.ui.View):
                     description=f"{i.specs.label()} · {i.status}"[:100],
                     value=i.id,
                     default=i.id == self.selected,
+                    emoji="⚡",
                 )
                 for i in instances[:25]
             ]
-            select = discord.ui.Select(placeholder="Choose a VPS…", options=options, row=0)
+            select = discord.ui.Select(placeholder="Choose your VPS…", options=options, row=0)
             select.callback = self._select  # type: ignore[method-assign]
             self.add_item(select)
         if not instances:
@@ -190,7 +296,7 @@ class ManageView(discord.ui.View):
         try:
             instance = await getattr(self.manager, action)(self.actor, self.selected)
             await interaction.followup.send(
-                f"`{instance.id}` is now **{instance.status}**.", ephemeral=True
+                f"⚡ `{instance.id}` is now **{instance.status}**.", ephemeral=True
             )
             if self.message:
                 await self.message.edit(embed=instance_embed(instance), view=self)
@@ -206,58 +312,7 @@ class ManageView(discord.ui.View):
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._power(interaction, "stop")
 
-    @discord.ui.button(label="Reinstall", emoji="🔄", style=discord.ButtonStyle.danger, row=1)
-    async def reinstall(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            instance = await self.manager.get(self.actor, self.selected)
-        except Exception as exc:
-            await interaction.response.send_message(error_text(exc), ephemeral=True)
-            return
-        view = ConfirmView(self.manager, self.actor, instance, "reinstall")
-        await interaction.response.send_message(
-            f"**Wipe `{instance.id}`?** This permanently erases its files, installed packages, "
-            "and running processes, then creates a fresh Ubuntu container with the same resources.",
-            view=view,
-            ephemeral=True,
-        )
-        view.message = await interaction.original_response()
-
-    @discord.ui.button(label="SSHX", emoji="💻", style=discord.ButtonStyle.primary, row=1)
-    async def sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            instance, url = await self.manager.sshx(self.actor, self.selected)
-            view = SSHXView(self.manager, self.actor, instance.id, url)
-            view.message = await interaction.followup.send(
-                f"**Private terminal for `{instance.id}`**\n"
-                "Anyone with this link can access the terminal. Do not share it. "
-                "The session stays active until you close it or stop/reinstall/delete the VPS. "
-                "Hiding this message or waiting for this panel to expire does not revoke the link.",
-                view=view,
-                ephemeral=True,
-                wait=True,
-            )
-        except Exception as exc:
-            log.exception("SSHX failed")
-            await interaction.followup.send(error_text(exc), ephemeral=True)
-
-    @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, row=2)
-    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
-        try:
-            instance = await self.manager.get(self.actor, self.selected)
-        except Exception as exc:
-            await interaction.response.send_message(error_text(exc), ephemeral=True)
-            return
-        view = ConfirmView(self.manager, self.actor, instance, "delete")
-        await interaction.response.send_message(
-            f"**Permanently delete `{instance.id}`?** Its container and disk will be destroyed. "
-            "This cannot be undone.",
-            view=view,
-            ephemeral=True,
-        )
-        view.message = await interaction.original_response()
-
-    @discord.ui.button(label="Refresh", emoji="🔃", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Refresh", emoji="🔃", style=discord.ButtonStyle.secondary, row=1)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -277,6 +332,58 @@ class ManageView(discord.ui.View):
         except Exception as exc:
             await interaction.followup.send(error_text(exc), ephemeral=True)
 
+    @discord.ui.button(label="SSHX", emoji="💻", style=discord.ButtonStyle.primary, row=2)
+    async def sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            instance, url = await self.manager.sshx(self.actor, self.selected)
+            view = SSHXView(self.manager, self.actor, instance.id, url)
+            view.message = await interaction.followup.send(
+                f"🔐 **Private root terminal for `{instance.id}`**\n"
+                "Anyone with this link gets **root access inside this VPS**. Do not share it. "
+                "The session stays active until you close it or stop/reinstall/delete the VPS. "
+                "Hiding this message or waiting for this panel to expire does not revoke the link.",
+                view=view,
+                ephemeral=True,
+                wait=True,
+            )
+        except Exception as exc:
+            log.exception("SSHX failed")
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="Reinstall", emoji="♻️", style=discord.ButtonStyle.danger, row=2)
+    async def reinstall(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            instance = await self.manager.get(self.actor, self.selected)
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = ConfirmView(self.manager, self.actor, instance, "reinstall")
+        await interaction.response.send_message(
+            f"♻️ **Wipe `{instance.id}`?** This permanently erases its files, installed packages, "
+            "and running processes, then creates a fresh Ubuntu root container "
+            "with the same resources.",
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, row=2)
+    async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            instance = await self.manager.get(self.actor, self.selected)
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = ConfirmView(self.manager, self.actor, instance, "delete")
+        await interaction.response.send_message(
+            f"🗑️ **Permanently delete `{instance.id}`?** Its container and disk will be destroyed. "
+            "This cannot be undone.",
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
     async def on_timeout(self) -> None:
         for child in self.children:
             child.disabled = True  # type: ignore[attr-defined]
@@ -294,7 +401,7 @@ class SSHXView(discord.ui.View):
         self.actor = actor
         self.instance_id = instance_id
         self.message: discord.WebhookMessage | None = None
-        self.add_item(discord.ui.Button(label="Open SSHX terminal", emoji="↗️", url=url))
+        self.add_item(discord.ui.Button(label="Open root terminal", emoji="↗️", url=url))
 
     async def on_timeout(self) -> None:
         # Expiring the panel does not revoke the session; the warning says so.

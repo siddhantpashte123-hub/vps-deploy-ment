@@ -10,12 +10,42 @@ class FakeBackend:
         self.fail_cleanup = False
         self.events: list[str] = []
 
-    def create(self, instance_id: str, specs: Specs, owner_id: int, guild_id: int) -> str:
+    def create(
+        self,
+        instance_id: str,
+        specs: Specs,
+        owner_id: int,
+        guild_id: int,
+        progress=None,
+    ) -> str:
         self.events.append("create:" + instance_id)
+        if progress:
+            progress("storage", 35)
         if self.fail_create:
             raise RuntimeError("simulated docker failure")
         self.items[instance_id] = {
             "status": "running",
+            "specs": specs,
+            "owner": owner_id,
+            "guild": guild_id,
+        }
+        if progress:
+            progress("container", 60)
+            progress("boot", 85)
+            progress("ready", 95)
+        return "container-" + instance_id
+
+    def recreate_container(
+        self,
+        instance_id: str,
+        specs: Specs,
+        owner_id: int,
+        guild_id: int,
+        running: bool = True,
+    ) -> str:
+        self.events.append("recreate-container:" + instance_id)
+        self.items[instance_id] = {
+            "status": "running" if running else "stopped",
             "specs": specs,
             "owner": owner_id,
             "guild": guild_id,

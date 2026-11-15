@@ -4,6 +4,7 @@ import logging
 import re
 import subprocess
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -19,6 +20,29 @@ from .models import Specs, valid_id
 log = logging.getLogger(__name__)
 LABEL = "io.github.fier.managed"
 URL_RE = re.compile(r"https://sshx\.io/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+")
+
+# Root is confined to the VPS container. These are Docker's default unprivileged
+# container capabilities; no SYS_ADMIN, privileged mode, host PID/network, Docker
+# socket, or host filesystem mount is granted.
+ROOT_USER = "0:0"
+VPS_HOME = "/home/fier"
+ROOT_CAPABILITIES = [
+    "AUDIT_WRITE",
+    "CHOWN",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "FSETID",
+    "KILL",
+    "MKNOD",
+    "NET_BIND_SERVICE",
+    "NET_RAW",
+    "SETFCAP",
+    "SETGID",
+    "SETUID",
+    "SETPCAP",
+    "SYS_CHROOT",
+]
+Progress = Callable[[str, int], None]
 
 
 def parse_sshx_url(raw: str) -> str | None:
@@ -37,6 +61,11 @@ def parse_sshx_url(raw: str) -> str | None:
     ):
         return None
     return raw if URL_RE.fullmatch(raw) else None
+
+
+def _report(progress: Progress | None, stage: str, percent: int) -> None:
+    if progress is not None:
+        progress(stage, percent)
 
 
 class DockerBackend:
@@ -123,8 +152,15 @@ class DockerBackend:
         # Must match the fixed STATE_ROOT in the root-owned volume helper.
         return f"/var/lib/fier/mounts/{instance_id}"
 
-    def create(self, instance_id: str, specs: Specs, owner_id: int, guild_id: int) -> str:
-        self._helper("create", instance_id, specs.disk_gb)
+    def _run_container(
+        self,
+        instance_id: str,
+        specs: Specs,
+        owner_id: int,
+        guild_id: int,
+        progress: Progress | None = None,
+    ) -> str:
+        _report(progress, "container", 60)
         try:
             container = self.client.containers.run(
                 image=self.settings.image,
@@ -133,12 +169,14 @@ class DockerBackend:
                 command=["/usr/bin/sleep", "infinity"],
                 detach=True,
                 init=True,
-                user="1000:1000",
-                working_dir="/home/fier",
+                user=ROOT_USER,
+                working_dir=VPS_HOME,
                 environment={
-                    "HOME": "/home/fier",
-                    "USER": "fier",
+                    "HOME": VPS_HOME,
+                    "USER": "root",
+                    "LOGNAME": "root",
                     "FIER_VPS_ID": instance_id,
+                    "FIER_ROOT_ACCESS": "1",
                     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
                 },
                 labels={
@@ -146,6 +184,7 @@ class DockerBackend:
                     "fier.id": instance_id,
                     "fier.owner": str(owner_id),
                     "fier.guild": str(guild_id),
+                    "fier.runtime": "root-v2",
                 },
                 network=self.settings.network,
                 mem_limit=specs.memory_bytes,
@@ -153,11 +192,12 @@ class DockerBackend:
                 nano_cpus=specs.cpu * 1_000_000_000,
                 pids_limit=256,
                 cap_drop=["ALL"],
+                cap_add=ROOT_CAPABILITIES,
                 security_opt=["no-new-privileges:true"],
-                read_only=True,
+                read_only=False,
                 mounts=[
                     Mount(
-                        target="/home/fier",
+                        target=VPS_HOME,
                         source=self.mount_path(instance_id),
                         type="bind",
                         read_only=False,
@@ -174,9 +214,48 @@ class DockerBackend:
                 auto_remove=False,
                 privileged=False,
             )
+            _report(progress, "boot", 85)
+            container.reload()
+            if not container.attrs.get("State", {}).get("Running"):
+                raise BackendError("The VPS container did not stay running.")
+            _report(progress, "ready", 95)
             return container.id
         except (DockerException, OSError) as exc:
             raise BackendError("Docker could not create the VPS. Check host resources.") from exc
+
+    def create(
+        self,
+        instance_id: str,
+        specs: Specs,
+        owner_id: int,
+        guild_id: int,
+        progress: Progress | None = None,
+    ) -> str:
+        _report(progress, "storage", 35)
+        self._helper("create", instance_id, specs.disk_gb)
+        _report(progress, "storage", 50)
+        return self._run_container(instance_id, specs, owner_id, guild_id, progress)
+
+    def recreate_container(
+        self,
+        instance_id: str,
+        specs: Specs,
+        owner_id: int,
+        guild_id: int,
+        running: bool = True,
+    ) -> str:
+        """Replace only the container, preserving the persistent home disk/files."""
+        container = self.get(instance_id)
+        if container is not None:
+            try:
+                container.remove(force=True, v=True)
+            except (DockerException, OSError) as exc:
+                raise BackendError("Docker could not replace the old VPS container.") from exc
+        self._helper("mount", instance_id)
+        container_id = self._run_container(instance_id, specs, owner_id, guild_id)
+        if not running:
+            self.stop(instance_id)
+        return container_id
 
     def get(self, instance_id: str) -> Any:
         if not valid_id(instance_id):
@@ -243,9 +322,7 @@ class DockerBackend:
         if container is None or container.status != "running":
             raise UserError("Start the VPS before opening SSHX.")
         try:
-            result = container.exec_run(
-                command, user="1000:1000", workdir="/home/fier", demux=False
-            )
+            result = container.exec_run(command, user=ROOT_USER, workdir=VPS_HOME, demux=False)
             output = result.output or b""
             return int(result.exit_code), output.decode("utf-8", "replace")[:8192]
         except (DockerException, OSError) as exc:

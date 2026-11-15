@@ -108,6 +108,41 @@ async def test_sshx_close_requires_owner(manager, backend, actor):
     assert "close-sshx:" + instance.id in backend.events
 
 
+async def test_deploy_emits_ordered_progress(manager, actor):
+    events = []
+
+    async def on_progress(stage, percent):
+        events.append((stage, percent))
+
+    instance = await manager.deploy(actor, Specs(1, 1, 1), on_progress)
+    assert instance.status == "running"
+    assert [p for _, p in events] == sorted(p for _, p in events)
+    assert events[0] == ("validate", 5)
+    assert events[-1] == ("online", 100)
+    assert {"reserve", "storage", "container", "boot", "ready"} <= {s for s, _ in events}
+
+
+async def test_progress_failure_does_not_fail_deploy(manager, actor):
+    async def broken(stage, percent):
+        raise RuntimeError("discord edit failed")
+
+    instance = await manager.deploy(actor, Specs(1, 1, 1), broken)
+    assert instance.status == "running"
+
+
+async def test_upgrade_runtime_preserves_home_and_stopped_state(manager, backend, actor, store):
+    running = await manager.deploy(actor, Specs(1, 1, 1))
+    stopped = await manager.deploy(Actor(222, actor.guild_id), Specs(1, 1, 1))
+    await manager.stop(Actor(222, actor.guild_id), stopped.id)
+    results = await manager.upgrade_runtime()
+    assert dict(results) == {running.id: True, stopped.id: True}
+    assert store.get(running.id).status == "running"
+    assert store.get(stopped.id).status == "stopped"
+    assert "recreate-container:" + running.id in backend.events
+    assert "wipe:" + running.id not in backend.events
+    assert "remove:" + running.id not in backend.events
+
+
 async def test_reconcile_interrupted_deploy(manager, store, backend, actor):
     instance = await manager.deploy(actor, Specs(1, 1, 1))
     store.update(instance.id, status="provisioning")

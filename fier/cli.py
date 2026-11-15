@@ -113,6 +113,34 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
     print("Enable Message Content Intent in the Developer Portal before starting the bot.")
 
 
+def upgrade(env_file: Path) -> None:
+    """Recreate existing VPS containers on the current image without wiping home files."""
+    import asyncio
+
+    from .backend import DockerBackend
+    from .config import Settings
+    from .manager import Manager
+    from .store import Store
+
+    settings = Settings.load(require_token=False, env_file=env_file)
+    store = Store(settings.data_dir / "fier.sqlite3")
+    backend = DockerBackend(settings)
+    manager = Manager(settings, store, backend)
+    try:
+        results = asyncio.run(manager.upgrade_runtime())
+    finally:
+        backend.close()
+        store.close()
+    if not results:
+        print("No existing VPS containers to upgrade.")
+        return
+    failed = [instance_id for instance_id, ok in results if not ok]
+    for instance_id, ok in results:
+        print(f"{instance_id}: {'upgraded to root runtime' if ok else 'UPGRADE FAILED'}")
+    if failed:
+        raise FierError("Some VPS upgrades failed: " + ", ".join(failed))
+
+
 def run() -> None:
     from .backend import DockerBackend
     from .bot import build_bot
@@ -140,7 +168,7 @@ def main() -> None:
     )
     logging.getLogger("discord.http").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(prog="fier", description="FIER Discord VPS manager")
-    parser.add_argument("command", choices=["run", "setup", "doctor", "version"])
+    parser.add_argument("command", choices=["run", "setup", "doctor", "upgrade", "version"])
     parser.add_argument("--env-file", type=Path, default=Path("/etc/fier/fier.env"))
     parser.add_argument(
         "--keep-existing-token",
@@ -159,6 +187,8 @@ def main() -> None:
             )
         elif args.command == "run":
             run()
+        elif args.command == "upgrade":
+            upgrade(args.env_file)
         else:
             from .backend import DockerBackend
             from .config import Settings

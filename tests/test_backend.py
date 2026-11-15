@@ -37,9 +37,12 @@ def test_reject_unsafe_sshx_url(url):
     assert parse_sshx_url(url) is None
 
 
-def test_container_hardening_and_real_limits(settings):
+def test_container_root_runtime_and_real_limits(settings):
     client = Mock()
-    client.containers.run.return_value = SimpleNamespace(id="container-id")
+    container = Mock()
+    container.id = "container-id"
+    container.attrs = {"State": {"Running": True}}
+    client.containers.run.return_value = container
     backend = DockerBackend(settings, client)
     with patch.object(backend, "_helper") as helper:
         result = backend.create("fier-a1b2c3d4e5f6", Specs(2, 3, 4), 123, 456)
@@ -51,12 +54,51 @@ def test_container_hardening_and_real_limits(settings):
     assert kwargs["nano_cpus"] == 3_000_000_000
     assert kwargs["pids_limit"] == 256
     assert kwargs["cap_drop"] == ["ALL"]
+    assert "CHOWN" in kwargs["cap_add"] and "SETUID" in kwargs["cap_add"]
+    assert "SYS_ADMIN" not in kwargs["cap_add"]
     assert kwargs["security_opt"] == ["no-new-privileges:true"]
-    assert kwargs["read_only"] is True and kwargs["privileged"] is False
-    assert kwargs["user"] == "1000:1000"
+    assert kwargs["read_only"] is False and kwargs["privileged"] is False
+    assert kwargs["user"] == "0:0"
+    assert kwargs["environment"]["USER"] == "root"
+    assert kwargs["labels"]["fier.runtime"] == "root-v2"
     assert "ports" not in kwargs and kwargs["mounts"][0]["Target"] == "/home/fier"
     assert "DISCORD_TOKEN" not in kwargs["environment"]
     assert kwargs["log_config"].type == "json-file"
+
+
+def test_create_reports_real_progress(settings):
+    client = Mock()
+    container = Mock()
+    container.id = "container-id"
+    container.attrs = {"State": {"Running": True}}
+    client.containers.run.return_value = container
+    backend = DockerBackend(settings, client)
+    events = []
+    with patch.object(backend, "_helper"):
+        backend.create(
+            "fier-a1b2c3d4e5f6", Specs(1, 1, 1), 1, 2, lambda s, p: events.append((s, p))
+        )
+    assert [p for _, p in events] == sorted(p for _, p in events)
+    assert events[-1] == ("ready", 95)
+    assert {"storage", "container", "boot"} <= {s for s, _ in events}
+
+
+def test_sshx_exec_runs_as_root(settings):
+    backend = DockerBackend(settings, Mock())
+    with patch.object(backend, "_exec", return_value=(0, "https://sshx.io/s/a#b\n")) as exec_mock:
+        assert backend.sshx("fier-a1b2c3d4e5f6") == "https://sshx.io/s/a#b"
+    assert exec_mock.call_args_list[0].args[1] == [
+        "/usr/local/bin/fier-sshx",
+        "start",
+        "fier-a1b2c3d4e5f6",
+    ]
+    with patch.object(backend, "get") as get:
+        container = Mock()
+        container.status = "running"
+        container.exec_run.return_value = SimpleNamespace(exit_code=0, output=b"ok")
+        get.return_value = container
+        backend._exec("fier-a1b2c3d4e5f6", ["id"])
+    assert container.exec_run.call_args.kwargs["user"] == "0:0"
 
 
 def test_helper_rejects_path_injection(settings):

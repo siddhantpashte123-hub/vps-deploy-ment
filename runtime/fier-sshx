@@ -49,7 +49,14 @@ def start(instance_id: str) -> None:
             ["/usr/local/bin/sshx", "--quiet", "--shell", "/bin/bash", "--name", instance_id],
             stdin=subprocess.DEVNULL, stdout=out, stderr=err,
             start_new_session=True, cwd="/home/fier",
-            env={**os.environ, "SHELL": "/bin/bash", "RUST_LOG": "error"},
+            env={
+                **os.environ,
+                "HOME": "/home/fier",
+                "USER": "root",
+                "LOGNAME": "root",
+                "SHELL": "/bin/bash",
+                "RUST_LOG": "error",
+            },
         )
     with open(PID, "w", opener=lambda p, f: os.open(p, f, 0o600)) as handle:
         handle.write(str(process.pid))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 import discord
 from discord.ext import commands
@@ -9,7 +10,17 @@ from .config import Settings
 from .errors import UserError
 from .manager import Manager
 from .models import Actor, Specs
-from .ui import COLOR, ConfirmView, ManageView, empty_embed, error_text, instance_embed
+from .ui import (
+    COLOR,
+    ConfirmView,
+    ManageView,
+    banner_file,
+    deploy_failure_embed,
+    deploy_progress_embed,
+    empty_embed,
+    error_text,
+    instance_embed,
+)
 
 log = logging.getLogger(__name__)
 
@@ -100,15 +111,34 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
             )
         specs = Specs(ram, cpu, disk)
         specs.validate(settings.max_ram_gb, settings.max_cpu, settings.max_disk_gb)
-        async with ctx.typing():
-            instance = await manager.deploy(actor, specs)
-        view = ManageView(bot, actor, [instance], instance.id)
         message = await ctx.send(
-            f"✅ VPS deployed: `{instance.id}`",
-            embed=instance_embed(instance),
-            view=view,
+            embed=deploy_progress_embed(specs, "validate", 5),
+            file=banner_file(),
             reference=ctx.message,
             mention_author=False,
+        )
+        last_edit = 0.0
+
+        async def on_progress(stage: str, percent: int) -> None:
+            nonlocal last_edit
+            now = time.monotonic()
+            # Discord rate-limits message edits; keep the meter live without spamming.
+            if percent < 100 and now - last_edit < 1.5:
+                return
+            last_edit = now
+            await message.edit(embed=deploy_progress_embed(specs, stage, percent))
+
+        try:
+            instance = await manager.deploy(actor, specs, on_progress)
+        except Exception as exc:
+            log.exception("Deploy command failed")
+            await message.edit(embed=deploy_failure_embed(specs, error_text(exc)), view=None)
+            return
+        view = ManageView(bot, actor, [instance], instance.id)
+        await message.edit(
+            content=f"✅ VPS deployed: `{instance.id}`",
+            embed=instance_embed(instance),
+            view=view,
         )
         view.message = message
 
@@ -130,6 +160,7 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
         view = ManageView(bot, actor, instances, selected)
         message = await ctx.send(
             embed=instance_embed(instance) if instance else empty_embed(),
+            file=banner_file(),
             view=view,
             reference=ctx.message,
             mention_author=False,
@@ -157,6 +188,7 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
             view = ManageView(bot, actor, instances)
             message = await ctx.send(
                 embed=instance_embed(instances[0]) if instances else empty_embed(),
+                file=banner_file(),
                 view=view,
                 reference=ctx.message,
                 mention_author=False,
@@ -224,7 +256,7 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
                 f"{settings.max_disk_gb} GiB disk"
             )
         )
-        await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+        await ctx.send(embed=embed, file=banner_file(), reference=ctx.message, mention_author=False)
 
     @bot.command(name="ping")
     async def ping(ctx: commands.Context):
