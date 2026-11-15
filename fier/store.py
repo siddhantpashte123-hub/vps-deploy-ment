@@ -6,9 +6,10 @@ from pathlib import Path
 
 from .errors import NotFound
 from .models import Instance, utc_now, valid_id
+from .os_catalog import valid_os
 
 COLUMNS = (
-    "id, guild_id, owner_id, ram_gb, cpu, disk_gb, container_id, status, created_at, updated_at"
+    "id, guild_id, owner_id, ram_gb, cpu, disk_gb, container_id, status, created_at, updated_at, os"
 )
 
 
@@ -34,9 +35,15 @@ class Store:
                     container_id TEXT,
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
+                    updated_at TEXT NOT NULL,
+                    os TEXT NOT NULL DEFAULT 'ubuntu-24.04'
                 )"""
             )
+            columns = {row[1] for row in self._db.execute("PRAGMA table_info(instances)")}
+            if "os" not in columns:
+                self._db.execute(
+                    "ALTER TABLE instances ADD COLUMN os TEXT NOT NULL DEFAULT 'ubuntu-24.04'"
+                )
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS instances_owner ON instances(guild_id, owner_id)"
             )
@@ -48,9 +55,11 @@ class Store:
     def add(self, instance: Instance) -> Instance:
         if not valid_id(instance.id):
             raise ValueError("Invalid internal instance ID")
+        if not valid_os(instance.os):
+            raise ValueError("Invalid OS")
         with self._lock, self._db:
             self._db.execute(
-                f"INSERT INTO instances ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO instances ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     instance.id,
                     str(instance.guild_id),
@@ -62,6 +71,7 @@ class Store:
                     instance.status,
                     instance.created_at,
                     instance.updated_at,
+                    instance.os,
                 ),
             )
         return instance
@@ -91,9 +101,11 @@ class Store:
         return [Instance.from_row(row) for row in rows]
 
     def update(self, instance_id: str, **fields: str | int | None) -> Instance:
-        allowed = {"status", "container_id"}
+        allowed = {"status", "container_id", "os"}
         if not fields or not set(fields) <= allowed:
             raise ValueError("Unsupported inventory update")
+        if "os" in fields and not valid_os(fields["os"]):
+            raise ValueError("Invalid OS")
         if "status" in fields and fields["status"] not in {
             "provisioning",
             "running",

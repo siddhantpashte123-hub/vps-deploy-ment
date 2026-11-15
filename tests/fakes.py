@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fier.models import Specs
+from fier.os_catalog import DEFAULT_OS
 
 
 class FakeBackend:
@@ -17,6 +18,7 @@ class FakeBackend:
         owner_id: int,
         guild_id: int,
         progress=None,
+        os_key: str = DEFAULT_OS,
     ) -> str:
         self.events.append("create:" + instance_id)
         if progress:
@@ -28,6 +30,7 @@ class FakeBackend:
             "specs": specs,
             "owner": owner_id,
             "guild": guild_id,
+            "os": os_key,
         }
         if progress:
             progress("container", 60)
@@ -42,6 +45,7 @@ class FakeBackend:
         owner_id: int,
         guild_id: int,
         running: bool = True,
+        os_key: str = DEFAULT_OS,
     ) -> str:
         self.events.append("recreate-container:" + instance_id)
         self.items[instance_id] = {
@@ -49,6 +53,7 @@ class FakeBackend:
             "specs": specs,
             "owner": owner_id,
             "guild": guild_id,
+            "os": os_key,
         }
         return "container-" + instance_id
 

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 
 from dotenv import load_dotenv
 
 from .errors import UserError
+from .os_catalog import DEFAULT_OS, os_choice
 
 
 def _int(name: str, default: int, minimum: int = 0, maximum: int = 1024) -> int:
@@ -42,9 +45,8 @@ class Settings:
     client_id: int | None
     allowed_guild_id: int | None
     admin_ids: frozenset[int]
-    deploy_role_id: int | None
     data_dir: Path
-    image: str
+    images: Mapping[str, str]
     network: str
     volume_helper: Path
     max_ram_gb: int
@@ -54,6 +56,10 @@ class Settings:
     max_total: int
     host_ram_mb: int
     host_cpu: int
+
+    def image_for(self, os_key: str) -> str:
+        os_choice(os_key)
+        return self.images[os_key]
 
     @classmethod
     def load(cls, require_token: bool = True, env_file: Path | None = None) -> Settings:
@@ -76,14 +82,16 @@ class Settings:
                 if not part.isdigit() or not 1 <= len(part) <= 25:
                     raise UserError("FIER_ADMIN_IDS must contain comma-separated numeric IDs.")
                 admin_ids.add(int(part))
+        legacy_image = os.getenv("FIER_IMAGE", "").strip()
+        ubuntu_image = os.getenv("FIER_IMAGE_UBUNTU", legacy_image or "fier-vps:local").strip()
+        debian_image = os.getenv("FIER_IMAGE_DEBIAN", "fier-vps:debian-12").strip()
         settings = cls(
             token=token,
             client_id=_optional_id("FIER_CLIENT_ID"),
             allowed_guild_id=_optional_id("FIER_ALLOWED_GUILD_ID"),
             admin_ids=frozenset(admin_ids),
-            deploy_role_id=_optional_id("FIER_DEPLOY_ROLE_ID"),
             data_dir=Path(os.getenv("FIER_DATA_DIR", "/var/lib/fier/data")).resolve(),
-            image=os.getenv("FIER_IMAGE", "fier-vps:local").strip(),
+            images=MappingProxyType({DEFAULT_OS: ubuntu_image, "debian-12": debian_image}),
             network=os.getenv("FIER_NETWORK", "fier-vps").strip(),
             volume_helper=Path(os.getenv("FIER_VOLUME_HELPER", "/usr/local/libexec/fier-volume")),
             max_ram_gb=_int("FIER_MAX_RAM_GB", 4, 1, 128),
@@ -95,6 +103,9 @@ class Settings:
             or max(512, int(_physical_ram_mb() * 0.75)),
             host_cpu=_int("FIER_HOST_CPU", 0, 0, 1024) or (os.cpu_count() or 1),
         )
-        if not settings.image or not settings.network:
-            raise UserError("FIER_IMAGE and FIER_NETWORK cannot be empty.")
+        if not settings.network:
+            raise UserError("FIER_NETWORK cannot be empty.")
+        for os_key, image in settings.images.items():
+            if not image or any(c.isspace() or ord(c) < 32 for c in image):
+                raise UserError(f"The configured image for {os_key} is invalid.")
         return settings

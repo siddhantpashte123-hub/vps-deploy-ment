@@ -1,26 +1,27 @@
 # FIER — Discord VPS Deploy Bot
 
-Control your own Ubuntu development containers from Discord:
+Admin-created Ubuntu 24.04 / Debian 12 development containers, controlled from Discord:
 
 ```text
-!deploy 1 1 1     RAM (GiB) · CPU cores · disk (GiB)
-!delete 1 1 1     match one of YOUR VPSes, then confirm
-!manage           Start · Stop · Reinstall · SSHX · Delete
+!deploy 1 1 1 @user   admin only: RAM (GiB) · CPU cores · disk (GiB), then choose OS
+!deploy 1 1 1         admin only: deploy for yourself, then choose OS
+!delete @user         admin only: pick one of that member's VPSes, then confirm
+!manage               Start · Stop · Reinstall (choose OS) · SSHX · Delete
 ```
 
-The installer installs dependencies, builds the VPS image, **asks for your bot token with hidden input**, validates it with Discord, starts a systemd service, and waits for the bot to report ready.
+The installer installs dependencies, builds both VPS images, **asks for your bot token with hidden input**, validates it with Discord, starts a systemd service, and waits for the bot to report ready.
 
-> **What “VPS” means here:** each instance is a Docker container on *your* host, not a new cloud server from a provider. It includes Ubuntu 24.04, Python, Node.js/npm, Git, build tools, tmux, and common utilities. SSHX opens directly as **root inside that container**, so `apt update` / `apt install` work. It is still container isolation: no separate kernel, no host systemd, no public IP, and no host root access is intended.
+> **What “VPS” means here:** each instance is a Docker container on *your* host, not a new cloud server from a provider. Choose **Ubuntu 24.04 LTS** or **Debian 12 (bookworm)** at deploy and reinstall time. Both include Python, Node.js/npm, Git, build tools, tmux, and common utilities. SSHX opens directly as **root inside that container**, so `apt update` / `apt install` work. It is still container isolation: no separate kernel, no host systemd, no public IP, and no host root access is intended.
 
 ## 1. Prepare the Discord application
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create an application named **FIER**.
-2. Open **Bot**, reset/copy the token, and enable **Message Content Intent**. This privileged intent is required for `!` commands. Keep Server Members Intent off.
+2. Open **Bot**, reset/copy the token, and enable **Message Content Intent**. This privileged intent is required for `!` commands. Server Members Intent is not required; mentioned members are resolved from the message or the REST API.
 3. Keep the token private. **Do not paste it into Discord or commit it to Git.** The installer asks for it in your server terminal.
 
 ## 2. One-command install on your VPS
 
-Use a dedicated **Ubuntu 22.04+ / Debian 12+** VPS with systemd, root/sudo access, x86_64 or ARM64, at least 2 GB RAM, and several GB of free disk. Outbound HTTPS must reach Discord, Docker Hub, Ubuntu/PyPI package mirrors, GitHub, the official SSHX download, and `sshx.io`.
+Use a dedicated **Ubuntu 22.04+ / Debian 12+** VPS with systemd, root/sudo access, x86_64 or ARM64, at least 2 GB RAM, and several GB of free disk. Outbound HTTPS must reach Discord, Docker Hub, Ubuntu/Debian/PyPI package mirrors, GitHub, the official SSHX download, and `sshx.io`.
 
 Run this on the VPS (one shell command):
 
@@ -33,7 +34,7 @@ The installer will:
 - install Python, Docker, and ext4/loop-mount utilities;
 - install the app under `/opt/fier` and create an unprivileged `fier` service user;
 - download the official SSHX client and record its SHA-256;
-- build `fier-vps:local`;
+- build `fier-vps:local` (Ubuntu 24.04) and `fier-vps:debian-12` (Debian 12);
 - prompt: `Paste bot token:` (hidden input);
 - save the token in `/etc/fier/fier.env` with mode `0600`;
 - enable/start `fier.service` and check Discord readiness;
@@ -47,18 +48,23 @@ If you already uploaded/cloned this repository, the local equivalent is:
 sudo bash install.sh
 ```
 
-Re-running the installer preserves the environment file and existing VPS inventory/home disks. It also recreates existing VPS containers on the current root runtime without wiping their `/home/fier` files. Press Enter at the token prompt to keep the existing token. For an unattended repair/upgrade that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
+Re-running the installer preserves the environment file and existing VPS inventory/home disks. It also recreates existing VPS containers on the current root runtime **using each VPS's recorded OS** without wiping their `/home/fier` files. Existing inventory rows migrate to Ubuntu 24.04 automatically. Press Enter at the token prompt to keep the existing token. For an unattended repair/upgrade that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
 
 ## 3. Use it
 
-In a server where the bot is present:
+In a server where the bot is present, an **admin** runs:
 
 ```text
-!deploy 1 1 1
-!manage
+!deploy 1 1 1 @user
 ```
 
-`!deploy` now shows a live premium progress meter with the deployment path: validate plan → reserve resources → prepare persistent disk → create root container → boot/health-check → finalize inventory → online.
+The bot asks which OS to install (**Ubuntu 24.04 LTS** or **Debian 12**), then shows a live premium progress meter with the deployment path: validate plan → reserve resources → prepare persistent disk → create root container → boot/health-check → finalize inventory → online. The VPS is owned by the mentioned member; per-user limits count against that member, not the admin. Omit the mention (`!deploy 1 1 1`) to deploy for yourself.
+
+The owner then runs:
+
+```text
+!manage
+```
 
 The management panel has:
 
@@ -66,7 +72,7 @@ The management panel has:
 |---|---|
 | **Start** | Start the existing container; files are preserved. |
 | **Stop** | Stop processes; the home disk is preserved. |
-| **Reinstall** | Confirm first, then **erase all files** and recreate a fresh Ubuntu container with the same ID/resources. |
+| **Reinstall** | Choose the replacement OS (Ubuntu 24.04 / Debian 12), confirm, then **erase all files** and recreate a fresh root container with the same ID/resources/owner. |
 | **SSHX** | Open a real browser terminal through `sshx.io` as **root inside the VPS container**; the capability link is sent only to you as an ephemeral Discord response. |
 | **Delete** | Confirm first, then remove the container and its disk permanently. |
 | **Refresh** | Reconcile the panel with Docker and the inventory. |
@@ -75,6 +81,7 @@ Other commands:
 
 ```text
 !manage fier-a1b2c3d4e5f6   open a specific VPS
+!delete @user               admin only: list that member's VPSes, pick one, then confirm
 !delete fier-a1b2c3d4e5f6   delete by ID (confirmation required)
 !delete 1 1 1               delete the unique VPS YOU own with exactly 1 GiB RAM / 1 CPU / 1 GiB disk
 !delete                     open the management panel
@@ -82,15 +89,15 @@ Other commands:
 !ping
 ```
 
-If several of your VPSes match `!delete 1 1 1`, nothing is deleted; the bot lists IDs so you can choose. Commands work in servers, not DMs. Use `!delete`, not `! delete`.
+`!delete @user` never bulk-deletes: the admin selects exactly one VPS from that member's list (paged if more than 25) and must confirm. If several of your VPSes match `!delete 1 1 1`, nothing is deleted; the bot lists IDs so you can choose. Commands work in servers, not DMs. Use `!delete`, not `! delete`.
 
 ### Permissions and limits
 
-- **Deploy:** server administrators by default, plus `FIER_ADMIN_IDS` and optionally `FIER_DEPLOY_ROLE_ID`.
-- **Manage/delete:** only the owner, server administrators, and configured bot admins; always scoped to the same guild.
+- **Deploy:** admins only — server administrators plus `FIER_ADMIN_IDS`. The old `FIER_DEPLOY_ROLE_ID` knob no longer grants creation rights.
+- **Manage/delete:** only the owner, server administrators, and configured bot admins; always scoped to the same guild. `!delete @user` is admin-only.
 - Defaults: max **2 VPSes/user**, **20 total**, plans up to **4 GiB RAM / 4 CPU / 20 GiB disk**.
 - RAM/CPU reservations are checked across the host before deployment. Where loop mounts work, disk images are fully allocated with `fallocate` and act as hard filesystem quotas for the persistent `/home/fier` disk; a 1 GiB safety reserve is required. On hosts without usable loop devices (common in LXC), FIER falls back to per-VPS owned directories: the disk argument is still a reserved host budget, but not a hard filesystem quota. The container's writable system layer is ephemeral and is not included in that home-disk quota. `python -m fier doctor` prints the active storage mode.
-- Edit `/etc/fier/fier.env` to change limits or allow a deploy role, then `sudo systemctl restart fier`. See `.env.example`.
+- Edit `/etc/fier/fier.env` to change limits, admin IDs, or per-OS images, then `sudo systemctl restart fier`. See `.env.example`.
 
 ### Inside the terminal
 
@@ -118,7 +125,7 @@ sudo journalctl -u fier -f
 sudo systemctl restart fier
 sudo systemctl stop fier
 sudo /opt/fier/.venv/bin/python -m fier doctor --env-file /etc/fier/fier.env
-# Recreate existing containers on the current root image; preserves /home/fier files:
+# Recreate existing containers on their recorded OS root image; preserves /home/fier files:
 sudo /opt/fier/.venv/bin/python -m fier upgrade --env-file /etc/fier/fier.env
 ```
 
@@ -135,7 +142,8 @@ sudo /opt/fier/.venv/bin/python -m fier upgrade --env-file /etc/fier/fier.env
 |---|---|
 | Bot process runs but is not online | Message Content Intent enabled? `journalctl -u fier -n 100`; token valid? Outbound HTTPS to Discord? |
 | Commands ignored | Bot invited to this server? Can it see/read/send in the channel? Using `!deploy`, not `! deploy`? Correct allowed guild? |
-| “Deploying is restricted” | You must be a server administrator/configured admin, or have the configured deploy role. |
+| “Only server administrators can create VPSes” | You must be a server administrator or listed in `FIER_ADMIN_IDS`. Deploy roles no longer grant creation. |
+| “image … is missing” | Re-run the installer so both `fier-vps:local` and `fier-vps:debian-12` are built; check `FIER_IMAGE_UBUNTU` / `FIER_IMAGE_DEBIAN`. |
 | Docker unavailable | `systemctl status docker`; service user has the `docker` supplementary group; run doctor. |
 | Disk helper denied | `/etc/sudoers.d/fier` and root-owned `/usr/local/libexec/fier-volume` installed? Re-run installer. |
 | `mount failed: No such file or directory` / loop errors | Usually missing `/dev/loop*` inside LXC. Re-run the installer; it creates loop nodes when allowed, mounts in PID 1's namespace, and otherwise falls back to directory storage. |
@@ -165,13 +173,13 @@ python3 -m venv .venv
 bash -n install.sh
 ```
 
-Tests use a fake Docker backend and cover ownership, guild isolation, resource reservation, concurrent deploy limits, cleanup failures, persistence, destructive operations, SSHX URL validation/private links, container hardening, token-file permissions, and installer-independent CLI behavior. They do **not** contact Discord or require Docker. CI runs these checks; a real deployment still needs a live Docker host and your bot token.
+Tests use a fake Docker backend and cover admin-only creation, mentioned-owner limits, OS selection on deploy/reinstall/upgrade, SQLite OS migration, ownership, guild isolation, resource reservation, concurrent deploy limits, cleanup failures, persistence, destructive operations, SSHX URL validation/private links, container hardening, token-file permissions, and installer-independent CLI behavior. They do **not** contact Discord or require Docker. CI runs these checks; a real deployment still needs a live Docker host and your bot token.
 
 Project layout:
 
 ```text
 fier/                 Discord commands, premium UI, inventory, Docker backend, CLI
-runtime/              Ubuntu root image + SSHX session helper
+runtime/              Ubuntu/Debian root images + shared SSHX session helper
 scripts/              root disk helper + SSHX downloader
 assets/               Discord embed banner
 systemd/fier.service  automatic service
