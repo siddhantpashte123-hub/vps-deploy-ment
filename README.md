@@ -10,7 +10,7 @@ Control your own Ubuntu development containers from Discord:
 
 The installer installs dependencies, builds the VPS image, **asks for your bot token with hidden input**, validates it with Discord, starts a systemd service, and waits for the bot to report ready.
 
-> **What “VPS” means here:** each instance is a Docker container on *your* host, not a new cloud server from a provider. It includes Ubuntu 24.04, Python, Node.js/npm, Git, build tools, tmux, and common utilities. It runs as a non-root user with a read-only system filesystem; use Python virtual environments and npm's home-directory prefix for packages. It does not provide a separate kernel, systemd, root `apt install`, or a public IP.
+> **What “VPS” means here:** each instance is a Docker container on *your* host, not a new cloud server from a provider. It includes Ubuntu 24.04, Python, Node.js/npm, Git, build tools, tmux, and common utilities. SSHX opens directly as **root inside that container**, so `apt update` / `apt install` work. It is still container isolation: no separate kernel, no host systemd, no public IP, and no host root access is intended.
 
 ## 1. Prepare the Discord application
 
@@ -47,7 +47,7 @@ If you already uploaded/cloned this repository, the local equivalent is:
 sudo bash install.sh
 ```
 
-Re-running the installer preserves the environment file and existing VPS inventory/disks. Press Enter at the token prompt to keep the existing token. For an unattended repair that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
+Re-running the installer preserves the environment file and existing VPS inventory/home disks. It also recreates existing VPS containers on the current root runtime without wiping their `/home/fier` files. Press Enter at the token prompt to keep the existing token. For an unattended repair/upgrade that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
 
 ## 3. Use it
 
@@ -58,6 +58,8 @@ In a server where the bot is present:
 !manage
 ```
 
+`!deploy` now shows a live premium progress meter with the deployment path: validate plan → reserve resources → prepare persistent disk → create root container → boot/health-check → finalize inventory → online.
+
 The management panel has:
 
 | Button | Behavior |
@@ -65,7 +67,7 @@ The management panel has:
 | **Start** | Start the existing container; files are preserved. |
 | **Stop** | Stop processes; the home disk is preserved. |
 | **Reinstall** | Confirm first, then **erase all files** and recreate a fresh Ubuntu container with the same ID/resources. |
-| **SSHX** | Open a real browser terminal through `sshx.io`; the capability link is sent only to you as an ephemeral Discord response. |
+| **SSHX** | Open a real browser terminal through `sshx.io` as **root inside the VPS container**; the capability link is sent only to you as an ephemeral Discord response. |
 | **Delete** | Confirm first, then remove the container and its disk permanently. |
 | **Refresh** | Reconcile the panel with Docker and the inventory. |
 
@@ -87,12 +89,16 @@ If several of your VPSes match `!delete 1 1 1`, nothing is deleted; the bot list
 - **Deploy:** server administrators by default, plus `FIER_ADMIN_IDS` and optionally `FIER_DEPLOY_ROLE_ID`.
 - **Manage/delete:** only the owner, server administrators, and configured bot admins; always scoped to the same guild.
 - Defaults: max **2 VPSes/user**, **20 total**, plans up to **4 GiB RAM / 4 CPU / 20 GiB disk**.
-- RAM/CPU reservations are checked across the host before deployment. Where loop mounts work, disk images are fully allocated with `fallocate` and act as hard filesystem quotas; a 1 GiB safety reserve is required. On hosts without usable loop devices (common in LXC), FIER falls back to per-VPS owned directories: the disk argument is still a reserved host budget, but not a hard filesystem quota. `python -m fier doctor` prints the active storage mode.
+- RAM/CPU reservations are checked across the host before deployment. Where loop mounts work, disk images are fully allocated with `fallocate` and act as hard filesystem quotas for the persistent `/home/fier` disk; a 1 GiB safety reserve is required. On hosts without usable loop devices (common in LXC), FIER falls back to per-VPS owned directories: the disk argument is still a reserved host budget, but not a hard filesystem quota. The container's writable system layer is ephemeral and is not included in that home-disk quota. `python -m fier doctor` prints the active storage mode.
 - Edit `/etc/fier/fier.env` to change limits or allow a deploy role, then `sudo systemctl restart fier`. See `.env.example`.
 
 ### Inside the terminal
 
+SSHX starts directly at a root shell (`root@fier-…`). You can use system package management inside the container:
+
 ```bash
+apt update
+apt install -y <package>
 python3 -m venv ~/mybot/.venv
 source ~/mybot/.venv/bin/activate
 pip install -U pip
@@ -100,7 +106,7 @@ pip install -U pip
 tmux new -s app
 ```
 
-`tmux` keeps a process running after you close the browser terminal, until the VPS is stopped/reinstalled/deleted. Start does not automatically relaunch your application. For npm, the image sets a writable global prefix under your home. System `apt` is intentionally unavailable to the non-root container user.
+`tmux` keeps a process running after you close the browser terminal, until the VPS is stopped/reinstalled/deleted. Start does not automatically relaunch your application. Persistent files live under `/home/fier`; Reinstall/Delete erase that home disk. Root here means root in the isolated container, not root on the bot host.
 
 **SSHX links grant terminal access.** Do not share them. Closing/hiding the Discord message or letting its buttons expire does not revoke a session; use **Close terminal session**, or stop/reinstall/delete the VPS. SSHX is a third-party service and requires outbound network access.
 
@@ -112,6 +118,8 @@ sudo journalctl -u fier -f
 sudo systemctl restart fier
 sudo systemctl stop fier
 sudo /opt/fier/.venv/bin/python -m fier doctor --env-file /etc/fier/fier.env
+# Recreate existing containers on the current root image; preserves /home/fier files:
+sudo /opt/fier/.venv/bin/python -m fier upgrade --env-file /etc/fier/fier.env
 ```
 
 - Inventory: `/var/lib/fier/data/fier.sqlite3` (persists across bot restarts).
@@ -133,12 +141,13 @@ sudo /opt/fier/.venv/bin/python -m fier doctor --env-file /etc/fier/fier.env
 | `mount failed: No such file or directory` / loop errors | Usually missing `/dev/loop*` inside LXC. Re-run the installer; it creates loop nodes when allowed, mounts in PID 1's namespace, and otherwise falls back to directory storage. |
 | `Permission denied` executing `/opt/fier/.venv/bin/python` | Re-run the installer; it makes the root-owned app/venv traversable by the `fier` service user. |
 | Not enough RAM/CPU/disk | Delete unused VPSes or adjust host budgets only if the host actually has capacity. |
+| SSHX still shows `fier@…` / `apt` read-only | The container is on the old runtime. Re-run the installer, or run `sudo /opt/fier/.venv/bin/python -m fier upgrade --env-file /etc/fier/fier.env`; home files are preserved. |
 | SSHX times out | VPS running? Outbound HTTPS/gRPC to `sshx.io` allowed? Third-party service available? Stop/start and retry. |
 | Container missing after manual Docker cleanup | Use Reinstall (wipes data) or Delete. FIER refuses to control unlabeled containers. |
 
 ## Security boundaries
 
-This is a **host-administration tool**, not a sandbox for hostile users. Docker socket/group access is effectively host-root access. Run it on a dedicated host, keep deploy permission restricted to trusted people, and never give untrusted users the Docker socket. Containers drop Linux capabilities, disable privilege escalation, run as UID 1000, have no published ports, and use a dedicated bridge with inter-container traffic disabled. They can still make outbound connections and may reach host/LAN endpoints unless you add appropriate host firewall rules. Do not expose this to untrusted tenants without stronger isolation (e.g. separate VMs) and network policy.
+This is a **host-administration tool**, not a sandbox for hostile users. Docker socket/group access is effectively host-root access. Run it on a dedicated host, keep deploy permission restricted to trusted people, and never give untrusted users the Docker socket. VPS containers run as root *inside the container* with Docker's default unprivileged capability set, `no-new-privileges`, no privileged mode, no published ports, no Docker socket/host filesystem mount, and a dedicated bridge with inter-container traffic disabled. They can still make outbound connections and may reach host/LAN endpoints unless you add appropriate host firewall rules. Do not expose this to untrusted tenants without stronger isolation (e.g. separate VMs) and network policy.
 
 The root-owned disk helper accepts only fixed actions, generated IDs, and bounded integer sizes; it does not accept arbitrary paths or shell commands. The bot never receives your Discord token inside a VPS. SSHX URLs are not logged or put in public embeds.
 
@@ -161,10 +170,11 @@ Tests use a fake Docker backend and cover ownership, guild isolation, resource r
 Project layout:
 
 ```text
-fier/                 Discord commands, UI, inventory, Docker backend, CLI
-runtime/              Ubuntu image + SSHX session helper
+fier/                 Discord commands, premium UI, inventory, Docker backend, CLI
+runtime/              Ubuntu root image + SSHX session helper
 scripts/              root disk helper + SSHX downloader
+assets/               Discord embed banner
 systemd/fier.service  automatic service
 tests/                offline unit tests
-install.sh            one-command host installer
+install.sh            one-command host installer/upgrade
 ```

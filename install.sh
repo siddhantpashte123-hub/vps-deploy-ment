@@ -62,7 +62,7 @@ install -d -o root -g root -m 0700 /etc/fier
 install -d -o root -g root -m 0755 /usr/local/libexec
 # Copy only application files; never copy a developer's .env, .git or venv.
 tar -C "$SOURCE_DIR" --exclude='__pycache__' --exclude='.pytest_cache' --exclude='.ruff_cache' \
-  -cf - fier scripts runtime systemd requirements.txt requirements-dev.txt pyproject.toml \
+  -cf - fier scripts runtime systemd assets requirements.txt requirements-dev.txt pyproject.toml \
   .env.example README.md install.sh | tar -C "$APP_DIR" -xf -
 chown -R root:root "$APP_DIR"
 python3 -m venv "$APP_DIR/.venv"
@@ -93,6 +93,15 @@ chmod 0600 "$ENV_FILE"
 chown root:root "$ENV_FILE"
 "$APP_DIR/.venv/bin/python" -m fier doctor --env-file "$ENV_FILE"
 
+say "Upgrading existing VPS containers to the root runtime (home files are preserved)"
+if "$APP_DIR/.venv/bin/python" -m fier upgrade --env-file "$ENV_FILE"; then
+  say "Existing VPS containers are on the root runtime"
+else
+  say "Warning: some existing VPS containers could not be upgraded; starting the bot anyway"
+fi
+# The upgrade CLI runs as root; keep the inventory writable by the service user.
+chown -R fier:fier "$STATE_DIR/data"
+
 say "Starting FIER automatically"
 install -o root -g root -m 0644 systemd/fier.service "/etc/systemd/system/$SERVICE"
 chmod -R a+rX "$APP_DIR"
@@ -121,6 +130,6 @@ CLIENT_ID="$("$APP_DIR/.venv/bin/python" -c 'from dotenv import dotenv_values; p
 say "FIER is online"
 printf 'Invite the bot (View Channels, Send Messages, Embed Links, Read Message History):\n'
 printf 'https://discord.com/oauth2/authorize?client_id=%s&scope=bot&permissions=84992\n\n' "$CLIENT_ID"
-printf 'In your server:  !deploy 1 1 1   →   !manage   →   SSHX\n'
+printf 'In your server:  !deploy 1 1 1   →   live progress meter   →   !manage   →   SSHX root terminal\n'
 printf 'Deploy is admin-only by default. Configure a deploy role in %s if needed.\n' "$ENV_FILE"
 printf 'Logs:     journalctl -u fier -f\nRestart:  systemctl restart fier\nStatus:   systemctl status fier\n'

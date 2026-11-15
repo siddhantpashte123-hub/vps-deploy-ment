@@ -11,7 +11,13 @@ from fier.cli import validate_token, write_env
 from fier.config import Settings
 from fier.errors import FierError
 from fier.models import Actor, Instance, utc_now
-from fier.ui import ConfirmView, ManageView, SSHXView, instance_embed
+from fier.ui import (
+    ConfirmView,
+    ManageView,
+    SSHXView,
+    deploy_progress_embed,
+    instance_embed,
+)
 
 
 def test_env_atomic_private_and_preserves_other_settings(tmp_path):
@@ -93,3 +99,24 @@ def test_sshx_link_is_a_button_not_embed_description():
     view = SSHXView(Mock(), Actor(2, 1), "fier-a1b2c3d4e5f6", url)
     assert any(child.url == url for child in view.children)
     assert view.timeout == 300
+    assert any(child.label == "Open root terminal" for child in view.children)
+
+
+def test_deploy_progress_meter_shows_percent_and_phases():
+    from fier.models import Specs
+
+    embed = deploy_progress_embed(Specs(1, 1, 1), "storage", 50)
+    text = str(embed.to_dict())
+    assert "50%" in text
+    assert "Prepare persistent disk" in text
+    assert "Create root container" in text
+    assert "█" in text and "░" in text
+    complete = deploy_progress_embed(Specs(1, 1, 1), "online", 100)
+    assert "100%" in str(complete.to_dict())
+
+
+def test_premium_instance_embed_advertises_root_without_credentials():
+    embed = instance_embed(sample_instance())
+    text = str(embed.to_dict())
+    assert "Root terminal" in text
+    assert "sshx.io/s/" not in text

@@ -5,6 +5,7 @@ import logging
 import secrets
 import shutil
 from collections import defaultdict
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from .config import Settings
@@ -15,8 +16,27 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 
+ProgressCallback = Callable[[str, int], Awaitable[None]]
+BackendProgress = Callable[[str, int], None]
+
+
 class Backend(Protocol):
-    def create(self, instance_id: str, specs: Specs, owner_id: int, guild_id: int) -> str: ...
+    def create(
+        self,
+        instance_id: str,
+        specs: Specs,
+        owner_id: int,
+        guild_id: int,
+        progress: BackendProgress | None = None,
+    ) -> str: ...
+    def recreate_container(
+        self,
+        instance_id: str,
+        specs: Specs,
+        owner_id: int,
+        guild_id: int,
+        running: bool = True,
+    ) -> str: ...
     def status(self, instance_id: str) -> str: ...
     def start(self, instance_id: str) -> None: ...
     def stop(self, instance_id: str) -> None: ...
@@ -56,7 +76,19 @@ class Manager:
         instances = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
         return [i for i in instances if i.specs == specs]
 
-    async def deploy(self, actor: Actor, specs: Specs) -> Instance:
+    async def _emit(self, on_progress: ProgressCallback | None, stage: str, percent: int) -> None:
+        if on_progress is None:
+            return
+        try:
+            await on_progress(stage, percent)
+        except Exception:
+            # A failed Discord edit must never fail an otherwise healthy deploy.
+            log.exception("Deployment progress update failed")
+
+    async def deploy(
+        self, actor: Actor, specs: Specs, on_progress: ProgressCallback | None = None
+    ) -> Instance:
+        await self._emit(on_progress, "validate", 5)
         specs.validate(self.settings.max_ram_gb, self.settings.max_cpu, self.settings.max_disk_gb)
         async with self._capacity_lock:
             mine = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
@@ -89,15 +121,36 @@ class Manager:
                 created_at=now,
                 updated_at=now,
             )
+            await self._emit(on_progress, "reserve", 15)
             await asyncio.to_thread(self.store.add, instance)
+        loop = asyncio.get_running_loop()
+
+        def thread_progress(stage: str, percent: int) -> None:
+            if on_progress is None:
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._emit(on_progress, stage, percent), loop
+                ).result(timeout=30)
+            except Exception:
+                log.exception("Deployment progress update failed")
+
         async with self._locks[instance.id]:
             try:
                 container_id = await asyncio.to_thread(
-                    self.backend.create, instance.id, specs, actor.user_id, actor.guild_id
+                    self.backend.create,
+                    instance.id,
+                    specs,
+                    actor.user_id,
+                    actor.guild_id,
+                    thread_progress,
                 )
-                return await asyncio.to_thread(
+                await self._emit(on_progress, "ready", 98)
+                result = await asyncio.to_thread(
                     self.store.update, instance.id, container_id=container_id, status="running"
                 )
+                await self._emit(on_progress, "online", 100)
+                return result
             except Exception as exc:
                 log.exception("Deployment failed for %s", instance.id)
                 try:
@@ -186,6 +239,37 @@ class Manager:
                 return instance
             status = await asyncio.to_thread(self.backend.status, instance_id)
             return await asyncio.to_thread(self.store.update, instance_id, status=status)
+
+    async def upgrade_runtime(self) -> list[tuple[str, bool]]:
+        """Replace containers with the current root runtime; preserve home disks/files."""
+        instances = await asyncio.to_thread(self.store.list)
+        results: list[tuple[str, bool]] = []
+        for instance in instances:
+            if instance.status == "deleting":
+                continue
+            async with self._locks[instance.id]:
+                running = instance.status != "stopped"
+                try:
+                    container_id = await asyncio.to_thread(
+                        self.backend.recreate_container,
+                        instance.id,
+                        instance.specs,
+                        instance.owner_id,
+                        instance.guild_id,
+                        running,
+                    )
+                    await asyncio.to_thread(
+                        self.store.update,
+                        instance.id,
+                        container_id=container_id,
+                        status="running" if running else "stopped",
+                    )
+                    results.append((instance.id, True))
+                except Exception:
+                    log.exception("Runtime upgrade failed for %s", instance.id)
+                    await asyncio.to_thread(self.store.update, instance.id, status="error")
+                    results.append((instance.id, False))
+        return results
 
     async def reconcile(self) -> None:
         instances = await asyncio.to_thread(self.store.list)
