@@ -133,12 +133,15 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
     values = dotenv_values(env_path)
     current = values.get("DISCORD_TOKEN") or ""
     current_guild = (values.get("FIER_ALLOWED_GUILD_ID") or "").strip()
-    if keep_existing:
-        if not current:
-            raise FierError("No existing token found. Run setup without --keep-existing-token.")
+    if keep_existing and current:
         token = current
         print("Reusing existing Discord token from the environment file.")
     else:
+        if keep_existing:
+            print(
+                "No saved Discord token found (fresh install or empty environment file). "
+                "Falling back to interactive setup."
+            )
         print("\nFIER — Discord bot token")
         print("Developer Portal → your application → Bot → Reset Token → Copy.")
         print("Also enable MESSAGE CONTENT INTENT on that Bot page.")
@@ -243,7 +246,10 @@ def main() -> None:
     parser.add_argument(
         "--keep-existing-token",
         action="store_true",
-        help="with setup: validate and reuse the saved token without prompting",
+        help=(
+            "with setup: reuse the saved token without prompting; "
+            "falls back to interactive setup if no token is saved yet"
+        ),
     )
     args = parser.parse_args()
     try:
