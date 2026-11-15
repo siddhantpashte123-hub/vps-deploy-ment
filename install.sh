@@ -38,7 +38,8 @@ systemctl enable --now docker
 systemctl is-active --quiet docker || die "Docker did not start."
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ ! -f "$SOURCE_DIR/fier/cli.py" || ! -f "$SOURCE_DIR/runtime/Dockerfile" ]]; then
+if [[ ! -f "$SOURCE_DIR/fier/cli.py" || ! -f "$SOURCE_DIR/runtime/ubuntu/Dockerfile" \
+  || ! -f "$SOURCE_DIR/runtime/debian/Dockerfile" ]]; then
   say "Downloading FIER from GitHub ($REF)"
   ARCHIVE="$TMP_DIR/source.tar.gz"
   curl --fail --location --retry 3 --connect-timeout 20 \
@@ -71,10 +72,11 @@ python3 -m venv "$APP_DIR/.venv"
 # must be able to traverse/read the root-owned application and virtualenv.
 chmod -R a+rX "$APP_DIR"
 
-say "Building the Ubuntu VPS image (first run may take a few minutes)"
+say "Building the Ubuntu 24.04 and Debian 12 VPS images (first run may take a few minutes)"
 cd "$APP_DIR"
 "$APP_DIR/.venv/bin/python" scripts/fetch_sshx.py --output runtime/sshx
-docker build --pull -t fier-vps:local runtime
+docker build --pull -t fier-vps:local -f runtime/ubuntu/Dockerfile runtime
+docker build --pull -t fier-vps:debian-12 -f runtime/debian/Dockerfile runtime
 install -o root -g root -m 0755 scripts/fier-volume /usr/local/libexec/fier-volume
 SUDOERS="$TMP_DIR/fier.sudoers"
 printf 'fier ALL=(root) NOPASSWD: /usr/local/libexec/fier-volume\n' > "$SUDOERS"
@@ -130,6 +132,8 @@ CLIENT_ID="$("$APP_DIR/.venv/bin/python" -c 'from dotenv import dotenv_values; p
 say "FIER is online"
 printf 'Invite the bot (View Channels, Send Messages, Embed Links, Read Message History):\n'
 printf 'https://discord.com/oauth2/authorize?client_id=%s&scope=bot&permissions=84992\n\n' "$CLIENT_ID"
-printf 'In your server:  !deploy 1 1 1   →   live progress meter   →   !manage   →   SSHX root terminal\n'
-printf 'Deploy is admin-only by default. Configure a deploy role in %s if needed.\n' "$ENV_FILE"
+printf 'In your server:  !deploy 1 1 1 @user   →   choose Ubuntu 24.04 / Debian 12   →   live progress meter\n'
+printf 'Owner commands:  !manage   →   Start/Stop/Reinstall (choose OS)/SSHX root terminal/Delete\n'
+printf 'Admin delete:    !delete @user   →   pick one VPS   →   confirm\n'
+printf 'Deploy is admin-only (server administrators or FIER_ADMIN_IDS in %s).\n' "$ENV_FILE"
 printf 'Logs:     journalctl -u fier -f\nRestart:  systemctl restart fier\nStatus:   systemctl status fier\n'

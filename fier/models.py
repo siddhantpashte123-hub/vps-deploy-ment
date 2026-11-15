@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from .errors import UserError
+from .os_catalog import DEFAULT_OS
 
 ID_PATTERN = re.compile(r"fier-[a-f0-9]{12}\Z")
 STATUSES = {"provisioning", "running", "stopped", "reinstalling", "deleting", "error"}
@@ -64,6 +65,7 @@ class Instance:
     status: str
     created_at: str
     updated_at: str
+    os: str = DEFAULT_OS
 
     @property
     def specs(self) -> Specs:

@@ -17,9 +17,8 @@ def settings(tmp_path: Path) -> Settings:
         client_id=None,
         allowed_guild_id=None,
         admin_ids=frozenset(),
-        deploy_role_id=None,
         data_dir=tmp_path,
-        image="fier-vps:local",
+        images={"ubuntu-24.04": "fier-vps:local", "debian-12": "fier-vps:debian-12"},
         network="fier-vps",
         volume_helper=Path("/usr/local/libexec/fier-volume"),
         max_ram_gb=4,
@@ -55,4 +54,9 @@ def manager(settings, store, backend, monkeypatch):
 
 @pytest.fixture
 def actor():
-    return Actor(123456789, 987654321)
+    return Actor(123456789, 987654321, is_admin=True)
+
+
+@pytest.fixture
+def member_actor():
+    return Actor(123456789, 987654321, is_admin=False)

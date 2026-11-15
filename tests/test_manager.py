@@ -92,7 +92,7 @@ async def test_failed_cleanup_retains_error_record(manager, backend, actor):
 
 async def test_numeric_delete_matches_only_own(manager, actor):
     mine = await manager.deploy(actor, Specs(1, 1, 1))
-    other = await manager.deploy(Actor(222, actor.guild_id), Specs(1, 1, 1))
+    other = await manager.deploy(actor, Specs(1, 1, 1), owner_id=222)
     matches = await manager.matching_own(actor, Specs(1, 1, 1))
     assert [i.id for i in matches] == [mine.id]
     assert other.id not in {i.id for i in matches}
@@ -130,14 +130,18 @@ async def test_progress_failure_does_not_fail_deploy(manager, actor):
     assert instance.status == "running"
 
 
-async def test_upgrade_runtime_preserves_home_and_stopped_state(manager, backend, actor, store):
+async def test_upgrade_runtime_preserves_home_os_and_stopped_state(manager, backend, actor, store):
     running = await manager.deploy(actor, Specs(1, 1, 1))
-    stopped = await manager.deploy(Actor(222, actor.guild_id), Specs(1, 1, 1))
+    stopped = await manager.deploy(actor, Specs(1, 1, 1), owner_id=222, os_key="debian-12")
     await manager.stop(Actor(222, actor.guild_id), stopped.id)
     results = await manager.upgrade_runtime()
     assert dict(results) == {running.id: True, stopped.id: True}
     assert store.get(running.id).status == "running"
     assert store.get(stopped.id).status == "stopped"
+    assert store.get(running.id).os == "ubuntu-24.04"
+    assert store.get(stopped.id).os == "debian-12"
+    assert backend.items[running.id]["os"] == "ubuntu-24.04"
+    assert backend.items[stopped.id]["os"] == "debian-12"
     assert "recreate-container:" + running.id in backend.events
     assert "wipe:" + running.id not in backend.events
     assert "remove:" + running.id not in backend.events
@@ -151,3 +155,85 @@ async def test_reconcile_interrupted_deploy(manager, store, backend, actor):
     backend.items[instance.id]["status"] = "stopped"
     await manager.reconcile()
     assert store.get(instance.id).status == "stopped"
+
+
+async def test_deploy_requires_admin(manager, member_actor, backend, store):
+    with pytest.raises(AccessDenied, match="Only admins"):
+        await manager.deploy(member_actor, Specs(1, 1, 1))
+    with pytest.raises(AccessDenied, match="Only admins"):
+        await manager.deploy(member_actor, Specs(1, 1, 1), owner_id=222)
+    assert backend.events == []
+    assert store.list() == []
+
+
+async def test_deploy_for_member_records_owner_guild_and_os(manager, actor, backend, store):
+    instance = await manager.deploy(actor, Specs(1, 2, 3), owner_id=222, os_key="debian-12")
+    assert instance.owner_id == 222
+    assert instance.guild_id == actor.guild_id
+    assert instance.os == "debian-12"
+    assert backend.items[instance.id]["owner"] == 222
+    assert backend.items[instance.id]["guild"] == actor.guild_id
+    assert backend.items[instance.id]["os"] == "debian-12"
+    assert store.get(instance.id) == instance
+    assert store.list(actor.guild_id, actor.user_id) == []
+    owner = Actor(222, actor.guild_id)
+    assert await manager.list(owner) == [instance]
+    assert (await manager.stop(owner, instance.id)).status == "stopped"
+
+
+async def test_per_user_limit_counts_target_not_admin(manager, actor):
+    await manager.deploy(actor, Specs(1, 1, 1), owner_id=222)
+    await manager.deploy(actor, Specs(1, 1, 1), owner_id=222)
+    with pytest.raises(UserError, match="<@222> already has the maximum"):
+        await manager.deploy(actor, Specs(1, 1, 1), owner_id=222)
+    own = await manager.deploy(actor, Specs(1, 1, 1))
+    assert own.owner_id == actor.user_id
+
+
+async def test_list_for_is_admin_only_and_guild_scoped(manager, actor, member_actor):
+    mine = await manager.deploy(actor, Specs(1, 1, 1), owner_id=222)
+    other_guild_admin = Actor(999, 555, True)
+    elsewhere = await manager.deploy(other_guild_admin, Specs(1, 1, 1), owner_id=222)
+    assert await manager.list_for(actor, 222) == [mine]
+    assert await manager.list_for(other_guild_admin, 222) == [elsewhere]
+    with pytest.raises(AccessDenied, match="Only admins"):
+        await manager.list_for(member_actor, member_actor.user_id)
+
+
+async def test_reinstall_can_switch_os_and_preserves_identity(manager, actor, backend, store):
+    first = await manager.deploy(actor, Specs(2, 2, 3), owner_id=222, os_key="debian-12")
+    second = await manager.reinstall(actor, first.id, os_key="ubuntu-24.04")
+    assert second.id == first.id
+    assert second.owner_id == 222
+    assert second.guild_id == first.guild_id
+    assert second.specs == first.specs
+    assert second.os == "ubuntu-24.04"
+    assert second.status == "running"
+    assert backend.items[first.id]["os"] == "ubuntu-24.04"
+    assert store.get(first.id).os == "ubuntu-24.04"
+    assert "wipe:" + first.id in backend.events
+    third = await manager.reinstall(actor, first.id)
+    assert third.os == "ubuntu-24.04"
+
+
+async def test_invalid_os_rejected_before_any_mutation(manager, actor, backend, store):
+    with pytest.raises(UserError, match="Unknown OS"):
+        await manager.deploy(actor, Specs(1, 1, 1), os_key="fedora-99")
+    assert store.list() == []
+    assert backend.events == []
+    instance = await manager.deploy(actor, Specs(1, 1, 1), os_key="debian-12")
+    before = list(backend.events)
+    with pytest.raises(UserError, match="Unknown OS"):
+        await manager.reinstall(actor, instance.id, os_key="fedora-99")
+    assert backend.events == before
+    assert store.get(instance.id) == instance
+
+
+async def test_failed_os_switch_keeps_recorded_os_and_marks_error(manager, actor, backend, store):
+    instance = await manager.deploy(actor, Specs(1, 1, 1), os_key="debian-12")
+    backend.fail_create = True
+    with pytest.raises(RuntimeError):
+        await manager.reinstall(actor, instance.id, os_key="ubuntu-24.04")
+    retained = store.get(instance.id)
+    assert retained.status == "error"
+    assert retained.os == "debian-12"

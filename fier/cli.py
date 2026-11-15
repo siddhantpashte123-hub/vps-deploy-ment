@@ -199,8 +199,9 @@ def main() -> None:
                 info = backend.preflight()
             finally:
                 backend.close()
+            images = ", ".join(f"{os_key}={image}" for os_key, image in settings.images.items())
             print(
-                f"Docker OK: {info.get('ServerVersion')} · image {settings.image} · "
+                f"Docker OK: {info.get('ServerVersion')} · images {images} · "
                 f"disk helper OK · storage={info.get('fier_storage_mode', 'unknown')}"
             )
             if info.get("fier_storage_mode") == "directory":

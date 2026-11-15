@@ -11,6 +11,7 @@ from typing import Protocol
 from .config import Settings
 from .errors import AccessDenied, BackendError, UserError
 from .models import Actor, Instance, Specs, utc_now, valid_id
+from .os_catalog import DEFAULT_OS, os_choice
 from .store import Store
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class Backend(Protocol):
         owner_id: int,
         guild_id: int,
         progress: BackendProgress | None = None,
+        os_key: str = DEFAULT_OS,
     ) -> str: ...
     def recreate_container(
         self,
@@ -36,6 +38,7 @@ class Backend(Protocol):
         owner_id: int,
         guild_id: int,
         running: bool = True,
+        os_key: str = DEFAULT_OS,
     ) -> str: ...
     def status(self, instance_id: str) -> str: ...
     def start(self, instance_id: str) -> None: ...
@@ -76,6 +79,12 @@ class Manager:
         instances = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
         return [i for i in instances if i.specs == specs]
 
+    async def list_for(self, actor: Actor, owner_id: int) -> list[Instance]:
+        """Admin-only inventory for one member of the actor's guild."""
+        if not actor.is_admin:
+            raise AccessDenied("Only admins can list another member's VPSes.")
+        return await asyncio.to_thread(self.store.list, actor.guild_id, owner_id)
+
     async def _emit(self, on_progress: ProgressCallback | None, stage: str, percent: int) -> None:
         if on_progress is None:
             return
@@ -86,15 +95,25 @@ class Manager:
             log.exception("Deployment progress update failed")
 
     async def deploy(
-        self, actor: Actor, specs: Specs, on_progress: ProgressCallback | None = None
+        self,
+        actor: Actor,
+        specs: Specs,
+        on_progress: ProgressCallback | None = None,
+        *,
+        owner_id: int | None = None,
+        os_key: str = DEFAULT_OS,
     ) -> Instance:
+        if not actor.is_admin:
+            raise AccessDenied("Only admins can create VPSes.")
+        os_choice(os_key)
+        owner_id = actor.user_id if owner_id is None else owner_id
         await self._emit(on_progress, "validate", 5)
         specs.validate(self.settings.max_ram_gb, self.settings.max_cpu, self.settings.max_disk_gb)
         async with self._capacity_lock:
-            mine = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
+            mine = await asyncio.to_thread(self.store.list, actor.guild_id, owner_id)
             if len(mine) >= self.settings.max_per_user:
                 raise UserError(
-                    f"You already have the maximum of {self.settings.max_per_user} VPSes."
+                    f"<@{owner_id}> already has the maximum of {self.settings.max_per_user} VPSes."
                 )
             count, ram, cpu = await asyncio.to_thread(self.store.totals)
             if count >= self.settings.max_total:
@@ -112,7 +131,7 @@ class Manager:
             instance = Instance(
                 id="fier-" + secrets.token_hex(6),
                 guild_id=actor.guild_id,
-                owner_id=actor.user_id,
+                owner_id=owner_id,
                 ram_gb=specs.ram_gb,
                 cpu=specs.cpu,
                 disk_gb=specs.disk_gb,
@@ -120,6 +139,7 @@ class Manager:
                 status="provisioning",
                 created_at=now,
                 updated_at=now,
+                os=os_key,
             )
             await self._emit(on_progress, "reserve", 15)
             await asyncio.to_thread(self.store.add, instance)
@@ -141,9 +161,10 @@ class Manager:
                     self.backend.create,
                     instance.id,
                     specs,
-                    actor.user_id,
+                    owner_id,
                     actor.guild_id,
                     thread_progress,
+                    os_key,
                 )
                 await self._emit(on_progress, "ready", 98)
                 result = await asyncio.to_thread(
@@ -169,7 +190,9 @@ class Manager:
                     "Deployment failed. Ask the host administrator to check the logs."
                 ) from exc
 
-    async def _operation(self, actor: Actor, instance_id: str, action: str) -> Instance:
+    async def _operation(
+        self, actor: Actor, instance_id: str, action: str, os_key: str | None = None
+    ) -> Instance:
         async with self._locks[instance_id]:
             instance = await self.get(actor, instance_id)
             if action == "delete":
@@ -178,6 +201,8 @@ class Manager:
                 await asyncio.to_thread(self.store.delete, instance_id)
                 return instance
             if action == "reinstall":
+                target_os = instance.os if os_key is None else os_key
+                os_choice(target_os)
                 await asyncio.to_thread(self.store.update, instance_id, status="reinstalling")
                 try:
                     await asyncio.to_thread(self.backend.remove_all, instance_id)
@@ -190,12 +215,15 @@ class Manager:
                         instance.specs,
                         instance.owner_id,
                         instance.guild_id,
+                        None,
+                        target_os,
                     )
                     return await asyncio.to_thread(
                         self.store.update,
                         instance_id,
                         container_id=container_id,
                         status="running",
+                        os=target_os,
                     )
                 except Exception:
                     await asyncio.to_thread(self.store.update, instance_id, status="error")
@@ -215,8 +243,10 @@ class Manager:
     async def stop(self, actor: Actor, instance_id: str) -> Instance:
         return await self._operation(actor, instance_id, "stop")
 
-    async def reinstall(self, actor: Actor, instance_id: str) -> Instance:
-        return await self._operation(actor, instance_id, "reinstall")
+    async def reinstall(
+        self, actor: Actor, instance_id: str, os_key: str | None = None
+    ) -> Instance:
+        return await self._operation(actor, instance_id, "reinstall", os_key)
 
     async def delete(self, actor: Actor, instance_id: str) -> Instance:
         return await self._operation(actor, instance_id, "delete")
@@ -257,6 +287,7 @@ class Manager:
                         instance.owner_id,
                         instance.guild_id,
                         running,
+                        instance.os,
                     )
                     await asyncio.to_thread(
                         self.store.update,

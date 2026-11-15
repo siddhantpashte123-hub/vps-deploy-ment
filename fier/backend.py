@@ -16,6 +16,7 @@ from docker.types import LogConfig, Mount, Ulimit
 from .config import Settings
 from .errors import BackendError, UserError
 from .models import Specs, valid_id
+from .os_catalog import DEFAULT_OS, os_label
 
 log = logging.getLogger(__name__)
 LABEL = "io.github.fier.managed"
@@ -115,7 +116,14 @@ class DockerBackend:
         try:
             self.client.ping()
             info = self.client.info()
-            self.client.images.get(self.settings.image)
+            for os_key, image in self.settings.images.items():
+                try:
+                    self.client.images.get(image)
+                except ImageNotFound as exc:
+                    raise BackendError(
+                        f"The {os_label(os_key)} image `{image}` is missing. "
+                        "Re-run install.sh to build it."
+                    ) from exc
             networks = self.client.networks.list(names=[self.settings.network])
             network = next((n for n in networks if n.name == self.settings.network), None)
             if network is None:
@@ -159,11 +167,12 @@ class DockerBackend:
         owner_id: int,
         guild_id: int,
         progress: Progress | None = None,
+        os_key: str = DEFAULT_OS,
     ) -> str:
         _report(progress, "container", 60)
         try:
             container = self.client.containers.run(
-                image=self.settings.image,
+                image=self.settings.image_for(os_key),
                 name=instance_id,
                 hostname=instance_id,
                 command=["/usr/bin/sleep", "infinity"],
@@ -185,6 +194,7 @@ class DockerBackend:
                     "fier.owner": str(owner_id),
                     "fier.guild": str(guild_id),
                     "fier.runtime": "root-v2",
+                    "fier.os": os_key,
                 },
                 network=self.settings.network,
                 mem_limit=specs.memory_bytes,
@@ -230,11 +240,12 @@ class DockerBackend:
         owner_id: int,
         guild_id: int,
         progress: Progress | None = None,
+        os_key: str = DEFAULT_OS,
     ) -> str:
         _report(progress, "storage", 35)
         self._helper("create", instance_id, specs.disk_gb)
         _report(progress, "storage", 50)
-        return self._run_container(instance_id, specs, owner_id, guild_id, progress)
+        return self._run_container(instance_id, specs, owner_id, guild_id, progress, os_key)
 
     def recreate_container(
         self,
@@ -243,6 +254,7 @@ class DockerBackend:
         owner_id: int,
         guild_id: int,
         running: bool = True,
+        os_key: str = DEFAULT_OS,
     ) -> str:
         """Replace only the container, preserving the persistent home disk/files."""
         container = self.get(instance_id)
@@ -252,7 +264,7 @@ class DockerBackend:
             except (DockerException, OSError) as exc:
                 raise BackendError("Docker could not replace the old VPS container.") from exc
         self._helper("mount", instance_id)
-        container_id = self._run_container(instance_id, specs, owner_id, guild_id)
+        container_id = self._run_container(instance_id, specs, owner_id, guild_id, os_key=os_key)
         if not running:
             self.stop(instance_id)
         return container_id
