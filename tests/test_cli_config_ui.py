@@ -106,6 +106,34 @@ def test_setup_repair_without_saved_guild_prompts_once(tmp_path, monkeypatch):
     assert dotenv_values(env)["FIER_ALLOWED_GUILD_ID"] == "987654321"
 
 
+@pytest.mark.parametrize("existing_env", [None, "DISCORD_TOKEN=\n"])
+def test_setup_repair_without_saved_token_falls_back_to_prompts(
+    tmp_path, monkeypatch, capsys, existing_env
+):
+    env = tmp_path / "fier.env"
+    if existing_env is not None:
+        env.write_text(existing_env)
+    token_prompts = []
+
+    def fake_getpass(prompt):
+        token_prompts.append(prompt)
+        return "a" * 60
+
+    monkeypatch.setattr("fier.cli.validate_token", lambda token: {"id": "123", "username": "FIER"})
+    monkeypatch.setattr("fier.cli.getpass.getpass", fake_getpass)
+    monkeypatch.setattr("builtins.input", lambda prompt: "987654321")
+    from fier.cli import setup
+
+    setup(env, keep_existing=True)
+    values = dotenv_values(env)
+    assert values["DISCORD_TOKEN"] == "a" * 60
+    assert values["FIER_ALLOWED_GUILD_ID"] == "987654321"
+    assert token_prompts == ["Paste bot token: "]
+    out = capsys.readouterr().out
+    assert "No saved Discord token found" in out
+    assert "Falling back to interactive setup" in out
+
+
 def test_prompt_guild_id_retries_invalid_and_keeps_existing(monkeypatch):
     from fier.cli import prompt_guild_id
 

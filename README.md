@@ -51,7 +51,7 @@ If you already uploaded/cloned this repository, the local equivalent is:
 sudo bash install.sh
 ```
 
-Re-running the installer preserves the environment file and existing VPS inventory/home disks. It also recreates existing VPS containers on the current root runtime **using each VPS's recorded OS** without wiping their `/home/fier` files. Existing inventory rows migrate to Ubuntu 24.04 automatically. Press Enter at the token prompt to keep the existing token. For a repair/upgrade that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`; it also reuses the saved server lock, or asks for the server ID once if none is saved yet. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
+Re-running the installer preserves the environment file and existing VPS inventory/home disks. It also recreates existing VPS containers on the current root runtime **using each VPS's recorded OS** without wiping their `/home/fier` files. Existing inventory rows migrate to Ubuntu 24.04 automatically. Press Enter at the token prompt to keep the existing token. For a repair/upgrade that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`; it also reuses the saved server lock, or asks for the server ID once if none is saved yet. If no token is saved at all (fresh host or empty env file), repair mode falls back to the normal interactive token + server ID prompts instead of failing. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
 
 ## 3. Use it
 
