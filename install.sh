@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # FIER one-command installer for a dedicated Ubuntu/Debian VPS with systemd.
 # Run as root, or let this script re-exec with sudo. A real TTY is required for
-# the hidden Discord token prompt; do not pipe this script into bash.
+# the hidden Discord token prompt and the single-server guild ID prompt;
+# do not pipe this script into bash.
 set -Eeuo pipefail
 umask 077
 
@@ -129,11 +130,15 @@ if [[ $READY -ne 1 ]]; then
 fi
 
 CLIENT_ID="$("$APP_DIR/.venv/bin/python" -c 'from dotenv import dotenv_values; print(dotenv_values("/etc/fier/fier.env").get("FIER_CLIENT_ID", ""))')"
+GUILD_ID="$("$APP_DIR/.venv/bin/python" -c 'from dotenv import dotenv_values; print(dotenv_values("/etc/fier/fier.env").get("FIER_ALLOWED_GUILD_ID", ""))')"
+[[ -n "$GUILD_ID" ]] || die "FIER_ALLOWED_GUILD_ID is missing. Re-run install.sh and enter your server ID."
 say "FIER is online"
-printf 'Invite the bot (View Channels, Send Messages, Embed Links, Read Message History):\n'
-printf 'https://discord.com/oauth2/authorize?client_id=%s&scope=bot&permissions=84992\n\n' "$CLIENT_ID"
+printf 'This bot is locked to server ID %s and will leave any other server.\n' "$GUILD_ID"
+printf 'Invite it to that server (View Channels, Send Messages, Embed Links, Read Message History):\n'
+printf 'https://discord.com/oauth2/authorize?client_id=%s&scope=bot&permissions=84992&guild_id=%s&disable_guild_select=true\n\n' "$CLIENT_ID" "$GUILD_ID"
 printf 'In your server:  !deploy 1 1 1 @user   →   choose Ubuntu 24.04 / Debian 12   →   live progress meter\n'
 printf 'Owner commands:  !manage   →   Start/Stop/Reinstall (choose OS)/SSHX root terminal/Delete\n'
 printf 'Admin delete:    !delete @user   →   pick one VPS   →   confirm\n'
 printf 'Deploy is admin-only (server administrators or FIER_ADMIN_IDS in %s).\n' "$ENV_FILE"
+printf 'Recommended: Developer Portal → Bot → turn OFF Public Bot.\n'
 printf 'Logs:     journalctl -u fier -f\nRestart:  systemctl restart fier\nStatus:   systemctl status fier\n'

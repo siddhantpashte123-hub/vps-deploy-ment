@@ -53,16 +53,80 @@ def test_token_validation_api():
             validate_token("a" * 60)
 
 
-def test_setup_keep_existing_token_does_not_prompt(tmp_path, monkeypatch):
+def test_setup_keep_existing_token_and_guild_does_not_prompt(tmp_path, monkeypatch):
     env = tmp_path / "fier.env"
-    env.write_text("DISCORD_TOKEN=" + "a" * 60 + "\n")
+    env.write_text("DISCORD_TOKEN=" + "a" * 60 + "\nFIER_ALLOWED_GUILD_ID=987654321\n")
     monkeypatch.setattr("fier.cli.validate_token", lambda token: {"id": "123", "username": "FIER"})
-    monkeypatch.setattr("fier.cli.getpass.getpass", lambda prompt: pytest.fail("prompted"))
+    monkeypatch.setattr("fier.cli.getpass.getpass", lambda prompt: pytest.fail("prompted token"))
+    monkeypatch.setattr("builtins.input", lambda prompt: pytest.fail("prompted guild"))
     from fier.cli import setup
 
     setup(env, keep_existing=True)
-    assert dotenv_values(env)["DISCORD_TOKEN"] == "a" * 60
-    assert dotenv_values(env)["FIER_CLIENT_ID"] == "123"
+    values = dotenv_values(env)
+    assert values["DISCORD_TOKEN"] == "a" * 60
+    assert values["FIER_CLIENT_ID"] == "123"
+    assert values["FIER_ALLOWED_GUILD_ID"] == "987654321"
+
+
+def test_setup_prompts_guild_after_token_and_locks_invite(tmp_path, monkeypatch, capsys):
+    env = tmp_path / "fier.env"
+    prompts = []
+
+    def fake_input(prompt):
+        prompts.append(prompt)
+        return "987654321"
+
+    monkeypatch.setattr("fier.cli.validate_token", lambda token: {"id": "123", "username": "FIER"})
+    monkeypatch.setattr("fier.cli.getpass.getpass", lambda prompt: "a" * 60)
+    monkeypatch.setattr("builtins.input", fake_input)
+    from fier.cli import setup
+
+    setup(env)
+    values = dotenv_values(env)
+    assert values["DISCORD_TOKEN"] == "a" * 60
+    assert values["FIER_ALLOWED_GUILD_ID"] == "987654321"
+    assert len(prompts) == 1
+    assert "Paste server (guild) ID" in prompts[0]
+    out = capsys.readouterr().out
+    assert out.index("Token validated") < out.index("FIER — single-server lock")
+    assert "guild_id=987654321" in out
+    assert "disable_guild_select=true" in out
+    assert "Public Bot" in out
+
+
+def test_setup_repair_without_saved_guild_prompts_once(tmp_path, monkeypatch):
+    env = tmp_path / "fier.env"
+    env.write_text("DISCORD_TOKEN=" + "a" * 60 + "\n")
+    monkeypatch.setattr("fier.cli.validate_token", lambda token: {"id": "123", "username": "FIER"})
+    monkeypatch.setattr("fier.cli.getpass.getpass", lambda prompt: pytest.fail("prompted token"))
+    monkeypatch.setattr("builtins.input", lambda prompt: "987654321")
+    from fier.cli import setup
+
+    setup(env, keep_existing=True)
+    assert dotenv_values(env)["FIER_ALLOWED_GUILD_ID"] == "987654321"
+
+
+def test_prompt_guild_id_retries_invalid_and_keeps_existing(monkeypatch):
+    from fier.cli import prompt_guild_id
+
+    answers = iter(["abc", "0", "123456789012345678"])
+    monkeypatch.setattr("builtins.input", lambda prompt: next(answers))
+    assert prompt_guild_id() == "123456789012345678"
+    monkeypatch.setattr("builtins.input", lambda prompt: "")
+    assert prompt_guild_id("987654321") == "987654321"
+
+
+def test_parse_guild_id_and_invite_url():
+    from fier.cli import invite_url, parse_guild_id
+
+    assert parse_guild_id(" 987654321 ") == 987654321
+    for bad in ["", "abc", "0", "-1", "12x3", "1" * 26]:
+        with pytest.raises(FierError):
+            parse_guild_id(bad)
+    url = invite_url("123", "987654321")
+    assert "client_id=123" in url
+    assert "guild_id=987654321" in url
+    assert "disable_guild_select=true" in url
 
 
 def test_settings_repr_hides_token(monkeypatch):

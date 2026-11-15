@@ -251,8 +251,6 @@ async def test_delete_id_and_specs_only_open_confirmation(
 
 
 async def test_guild_check_rejects_dms_and_other_guilds(settings, manager, backend, actor, guild):
-    from dataclasses import replace
-
     restricted = build_bot(replace(settings, allowed_guild_id=actor.guild_id), manager, backend)
     member = make_member(actor.user_id, guild, admin=True)
     with pytest.raises(commands.NoPrivateMessage):
@@ -260,6 +258,37 @@ async def test_guild_check_rejects_dms_and_other_guilds(settings, manager, backe
     other_guild = SimpleNamespace(id=999, get_member=Mock(), fetch_member=AsyncMock())
     with pytest.raises(commands.CheckFailure, match="restricted"):
         await invoke(restricted, other_guild, member, "deploy", "1 1 1")
+
+
+def test_build_bot_requires_single_guild_lock(settings, manager, backend):
+    with pytest.raises(UserError, match="FIER_ALLOWED_GUILD_ID is required"):
+        build_bot(replace(settings, allowed_guild_id=None), manager, backend)
+
+
+async def test_actor_for_rejects_other_guild(bot, guild, actor):
+    member = make_member(actor.user_id, guild, admin=True)
+    with pytest.raises(UserError, match="locked to one Discord server"):
+        bot.actor_for(member, 999)
+
+
+async def test_on_guild_join_leaves_unauthorized_server(bot, actor):
+    allowed = SimpleNamespace(id=actor.guild_id, name="allowed", leave=AsyncMock())
+    other = SimpleNamespace(id=999, name="other", leave=AsyncMock())
+    await bot.on_guild_join(allowed)
+    await bot.on_guild_join(other)
+    allowed.leave.assert_not_awaited()
+    other.leave.assert_awaited_once()
+
+
+async def test_on_ready_leaves_unauthorized_servers(bot, actor, monkeypatch):
+    allowed = SimpleNamespace(id=actor.guild_id, name="allowed", leave=AsyncMock())
+    other = SimpleNamespace(id=999, name="other", leave=AsyncMock())
+    monkeypatch.setattr(bot._connection, "_guilds", {g.id: g for g in (allowed, other)})
+    monkeypatch.setattr(bot, "change_presence", AsyncMock())
+    await bot.on_ready()
+    allowed.leave.assert_not_awaited()
+    other.leave.assert_awaited_once()
+    bot.change_presence.assert_awaited_once()
 
 
 async def test_os_selection_deploys_for_target_once(

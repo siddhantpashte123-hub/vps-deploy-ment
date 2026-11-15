@@ -78,6 +78,51 @@ def write_env(path: Path, updates: dict[str, str]) -> None:
             os.unlink(temporary)
 
 
+def parse_guild_id(raw: str) -> int:
+    """Validate the single Discord server (guild) ID entered during setup."""
+    value = raw.strip()
+    if not value.isdigit() or not 1 <= len(value) <= 25 or int(value) <= 0:
+        raise FierError("Server ID must be a positive Discord numeric ID (digits only).")
+    return int(value)
+
+
+def invite_url(client_id: str | int, guild_id: str | int) -> str:
+    return (
+        f"https://discord.com/oauth2/authorize?client_id={client_id}"
+        f"&scope=bot&permissions=84992&guild_id={guild_id}&disable_guild_select=true"
+    )
+
+
+def prompt_guild_id(current: str = "") -> str:
+    print("\nFIER — single-server lock")
+    print("This bot will stay in ONLY this Discord server and leave any other server.")
+    print(
+        "Copy the Server ID: Discord User Settings → Advanced → Developer Mode ON, "
+        "then right-click the server icon → Copy Server ID."
+    )
+    while True:
+        prompt = (
+            "Paste server (guild) ID (Enter keeps existing ID): "
+            if current
+            else "Paste server (guild) ID: "
+        )
+        raw = input(prompt).strip()
+        if not raw and current:
+            try:
+                parse_guild_id(current)
+            except FierError:
+                print(f"Existing saved server ID is invalid: {current!r}. Enter a new one.")
+                current = ""
+                continue
+            return current
+        try:
+            parse_guild_id(raw)
+        except FierError as exc:
+            print(exc)
+            continue
+        return raw
+
+
 def setup(env_path: Path, template: Path | None = None, keep_existing: bool = False) -> None:
     if not env_path.exists() and template and template.exists():
         env_path.parent.mkdir(parents=True, exist_ok=True)
@@ -85,7 +130,9 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
         env_path.chmod(0o600)
     from dotenv import dotenv_values
 
-    current = dotenv_values(env_path).get("DISCORD_TOKEN") or ""
+    values = dotenv_values(env_path)
+    current = values.get("DISCORD_TOKEN") or ""
+    current_guild = (values.get("FIER_ALLOWED_GUILD_ID") or "").strip()
     if keep_existing:
         if not current:
             raise FierError("No existing token found. Run setup without --keep-existing-token.")
@@ -105,12 +152,35 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
         if not token and current:
             token = current
     data = validate_token(token)
-    write_env(env_path, {"DISCORD_TOKEN": token, "FIER_CLIENT_ID": str(data["id"])})
-    print(f"Token validated for {data.get('username', 'bot')}. Saved securely to {env_path}.")
-    print(
-        f"Invite: https://discord.com/oauth2/authorize?client_id={data['id']}&scope=bot&permissions=84992"
+    print(f"Token validated for {data.get('username', 'bot')}.")
+
+    guild_id = ""
+    if current_guild:
+        try:
+            parse_guild_id(current_guild)
+        except FierError:
+            current_guild = ""
+    if keep_existing and current_guild:
+        guild_id = current_guild
+        print(f"Reusing existing single-server lock: {guild_id}.")
+    else:
+        guild_id = prompt_guild_id(current_guild)
+
+    write_env(
+        env_path,
+        {
+            "DISCORD_TOKEN": token,
+            "FIER_CLIENT_ID": str(data["id"]),
+            "FIER_ALLOWED_GUILD_ID": guild_id,
+        },
     )
-    print("Enable Message Content Intent in the Developer Portal before starting the bot.")
+    print(f"Saved securely to {env_path}.")
+    print(f"Bot locked to server ID {guild_id}; it will leave any other server.")
+    print(f"Invite: {invite_url(data['id'], guild_id)}")
+    print(
+        "Recommended: Developer Portal → Bot → turn OFF Public Bot so only you can add it. "
+        "Enable Message Content Intent before starting the bot."
+    )
 
 
 def upgrade(env_file: Path) -> None:

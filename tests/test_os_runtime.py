@@ -94,3 +94,6 @@ def test_runtime_dockerfiles_and_installer_build_both_contexts():
         )
         assert f"$SOURCE_DIR/runtime/{directory}/Dockerfile" in installer
     assert (ROOT / "runtime" / "fier-sshx").is_file()
+    assert "FIER_ALLOWED_GUILD_ID" in installer
+    assert "guild_id=%s&disable_guild_select=true" in installer
+    assert "locked to server ID %s" in installer

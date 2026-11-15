@@ -9,7 +9,7 @@ Admin-created Ubuntu 24.04 / Debian 12 development containers, controlled from D
 !manage               Start · Stop · Reinstall (choose OS) · SSHX · Delete
 ```
 
-The installer installs dependencies, builds both VPS images, **asks for your bot token with hidden input**, validates it with Discord, starts a systemd service, and waits for the bot to report ready.
+The installer installs dependencies, builds both VPS images, **asks for your bot token with hidden input**, validates it with Discord, then asks for the **one Discord server (guild) ID** the bot may stay in, starts a systemd service, and waits for the bot to report ready. The bot is locked to that server and automatically leaves any other server.
 
 > **What “VPS” means here:** each instance is a Docker container on *your* host, not a new cloud server from a provider. Choose **Ubuntu 24.04 LTS** or **Debian 12 (bookworm)** at deploy and reinstall time. Both include Python, Node.js/npm, Git, build tools, tmux, and common utilities. SSHX opens directly as **root inside that container**, so `apt update` / `apt install` work. It is still container isolation: no separate kernel, no host systemd, no public IP, and no host root access is intended.
 
@@ -17,7 +17,9 @@ The installer installs dependencies, builds both VPS images, **asks for your bot
 
 1. Open the [Discord Developer Portal](https://discord.com/developers/applications) and create an application named **FIER**.
 2. Open **Bot**, reset/copy the token, and enable **Message Content Intent**. This privileged intent is required for `!` commands. Server Members Intent is not required; mentioned members are resolved from the message or the REST API.
-3. Keep the token private. **Do not paste it into Discord or commit it to Git.** The installer asks for it in your server terminal.
+3. Recommended: turn **Public Bot** off so only you can invite it. FIER also locks itself to the one server ID you enter during setup and leaves any other server automatically.
+4. Copy your Discord **Server ID**: User Settings → Advanced → Developer Mode ON, then right-click the server icon → Copy Server ID. The installer asks for this right after the bot token.
+5. Keep the token private. **Do not paste it into Discord or commit it to Git.** The installer asks for it in your server terminal.
 
 ## 2. One-command install on your VPS
 
@@ -36,11 +38,12 @@ The installer will:
 - download the official SSHX client and record its SHA-256;
 - build `fier-vps:local` (Ubuntu 24.04) and `fier-vps:debian-12` (Debian 12);
 - prompt: `Paste bot token:` (hidden input);
-- save the token in `/etc/fier/fier.env` with mode `0600`;
+- prompt: `Paste server (guild) ID:` — the **only** Discord server this bot may stay in;
+- save the token and `FIER_ALLOWED_GUILD_ID` in `/etc/fier/fier.env` with mode `0600`;
 - enable/start `fier.service` and check Discord readiness;
-- print the bot invite URL.
+- print a server-locked bot invite URL.
 
-Invite the bot with the printed URL. It needs **View Channels, Send Messages, Embed Links, and Read Message History**. It does **not** need Administrator in Discord. Enable Message Content Intent before starting; otherwise Discord rejects the gateway connection.
+Invite the bot with the printed URL. It needs **View Channels, Send Messages, Embed Links, and Read Message History**. It does **not** need Administrator in Discord. Enable Message Content Intent before starting; otherwise Discord rejects the gateway connection. If someone adds the bot to another server, FIER leaves that server automatically and refuses commands there.
 
 If you already uploaded/cloned this repository, the local equivalent is:
 
@@ -48,11 +51,11 @@ If you already uploaded/cloned this repository, the local equivalent is:
 sudo bash install.sh
 ```
 
-Re-running the installer preserves the environment file and existing VPS inventory/home disks. It also recreates existing VPS containers on the current root runtime **using each VPS's recorded OS** without wiping their `/home/fier` files. Existing inventory rows migrate to Ubuntu 24.04 automatically. Press Enter at the token prompt to keep the existing token. For an unattended repair/upgrade that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
+Re-running the installer preserves the environment file and existing VPS inventory/home disks. It also recreates existing VPS containers on the current root runtime **using each VPS's recorded OS** without wiping their `/home/fier` files. Existing inventory rows migrate to Ubuntu 24.04 automatically. Press Enter at the token prompt to keep the existing token. For a repair/upgrade that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`; it also reuses the saved server lock, or asks for the server ID once if none is saved yet. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
 
 ## 3. Use it
 
-In a server where the bot is present, an **admin** runs:
+In the **one configured server** where the bot is present, an **admin** runs:
 
 ```text
 !deploy 1 1 1 @user
@@ -93,6 +96,7 @@ Other commands:
 
 ### Permissions and limits
 
+- **Single-server lock:** `FIER_ALLOWED_GUILD_ID` is required. The installer asks for it after the token; the bot refuses commands elsewhere and leaves any other server it is added to.
 - **Deploy:** admins only — server administrators plus `FIER_ADMIN_IDS`. The old `FIER_DEPLOY_ROLE_ID` knob no longer grants creation rights.
 - **Manage/delete:** only the owner, server administrators, and configured bot admins; always scoped to the same guild. `!delete @user` is admin-only.
 - Defaults: max **2 VPSes/user**, **20 total**, plans up to **4 GiB RAM / 4 CPU / 20 GiB disk**.
@@ -142,6 +146,7 @@ sudo /opt/fier/.venv/bin/python -m fier upgrade --env-file /etc/fier/fier.env
 |---|---|
 | Bot process runs but is not online | Message Content Intent enabled? `journalctl -u fier -n 100`; token valid? Outbound HTTPS to Discord? |
 | Commands ignored | Bot invited to this server? Can it see/read/send in the channel? Using `!deploy`, not `! deploy`? Correct allowed guild? |
+| Bot leaves a server / “restricted to another Discord server” | That server is not the saved `FIER_ALLOWED_GUILD_ID`. Re-run setup/installer and enter the intended Server ID, or edit `/etc/fier/fier.env` and restart. |
 | “Only server administrators can create VPSes” | You must be a server administrator or listed in `FIER_ADMIN_IDS`. Deploy roles no longer grant creation. |
 | “image … is missing” | Re-run the installer so both `fier-vps:local` and `fier-vps:debian-12` are built; check `FIER_IMAGE_UBUNTU` / `FIER_IMAGE_DEBIAN`. |
 | Docker unavailable | `systemctl status docker`; service user has the `docker` supplementary group; run doctor. |

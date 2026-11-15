@@ -52,6 +52,11 @@ class FierBot(commands.Bot):
     def actor_for(self, user: discord.Member | discord.User, guild_id: int | None) -> Actor:
         if guild_id is None:
             raise UserError("Use FIER inside a Discord server, not in DMs.")
+        allowed = self.settings.allowed_guild_id
+        if allowed is None:
+            raise UserError("FIER_ALLOWED_GUILD_ID is not configured. Run setup again.")
+        if guild_id != allowed:
+            raise UserError("This bot is locked to one Discord server.")
         is_admin = user.id in self.settings.admin_ids
         if isinstance(user, discord.Member):
             is_admin = is_admin or user.guild_permissions.administrator
@@ -63,7 +68,24 @@ class FierBot(commands.Bot):
         await asyncio.to_thread(self.backend.preflight)
         await self.manager.reconcile()
 
+    async def _leave_guild(self, guild: discord.Guild) -> None:
+        try:
+            await guild.leave()
+            log.warning("Left unauthorized guild id=%s name=%s", guild.id, guild.name)
+        except discord.HTTPException:
+            log.exception("Could not leave unauthorized guild id=%s", guild.id)
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        allowed = self.settings.allowed_guild_id
+        if allowed is not None and guild.id != allowed:
+            await self._leave_guild(guild)
+
     async def on_ready(self) -> None:
+        allowed = self.settings.allowed_guild_id
+        if allowed is not None:
+            for guild in list(self.guilds):
+                if guild.id != allowed:
+                    await self._leave_guild(guild)
         if not self._ready_logged:
             log.info("FIER_READY bot=%s id=%s", self.user, self.user.id if self.user else "unknown")
             self._ready_logged = True
@@ -112,12 +134,17 @@ async def resolve_member(ctx: commands.Context, user_id: int) -> discord.Member:
 
 
 def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
+    if settings.allowed_guild_id is None:
+        raise UserError(
+            "FIER_ALLOWED_GUILD_ID is required. Run the installer or `python -m fier setup` "
+            "and enter the one server ID this bot may stay in."
+        )
     bot = FierBot(settings, manager, backend)
 
     async def guild_check(ctx: commands.Context) -> bool:
         if ctx.guild is None:
             raise commands.NoPrivateMessage("Use FIER commands in a server.")
-        if settings.allowed_guild_id and ctx.guild.id != settings.allowed_guild_id:
+        if ctx.guild.id != settings.allowed_guild_id:
             raise commands.CheckFailure("This bot is restricted to another Discord server.")
         return True
 
