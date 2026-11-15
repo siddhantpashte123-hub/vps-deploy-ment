@@ -9,7 +9,7 @@ APP_DIR=/opt/fier
 STATE_DIR=/var/lib/fier
 ENV_FILE=/etc/fier/fier.env
 SERVICE=fier.service
-REF="${FIER_REF:-arena/43b52dc0-vps-deploy-ment}"
+REF="${FIER_REF:-main}"
 REPO="${FIER_REPO:-siddhantpashte123-hub/vps-deploy-ment}"
 TMP_DIR="$(mktemp -d /tmp/fier-install.XXXXXX)"
 trap 'rm -rf "$TMP_DIR"' EXIT
