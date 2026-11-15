@@ -2,7 +2,8 @@
 """Download the official static SSHX client without curl|sh; record its SHA-256.
 
 Upstream publishes a rolling artifact, not versioned release assets. Set
-FIER_SSHX_SHA256 to a hash you have reviewed to pin subsequent installations.
+FIER_SSHX_SHA256 to the SHA-256 of the *binary* you have reviewed to pin
+subsequent installations.
 """
 
 from __future__ import annotations
@@ -12,12 +13,65 @@ import hashlib
 import io
 import os
 import platform
+import posixpath
 import tarfile
 import urllib.request
 from pathlib import Path
 
 BASE_URL = "https://s3.amazonaws.com/sshx/sshx-{arch}-unknown-linux-musl.tar.gz"
 MAX_DOWNLOAD = 64 * 1024 * 1024
+MAX_MEMBERS = 64
+ELF_MAGIC = b"\x7fELF"
+
+
+class ArchiveError(Exception):
+    """Safe-to-display archive validation failure."""
+
+
+def _safe_name(name: str) -> str:
+    if not name or "\x00" in name or name.startswith("/"):
+        raise ArchiveError("Unsafe path in SSHX archive.")
+    parts = name.split("/")
+    if ".." in parts:
+        raise ArchiveError("Unsafe path in SSHX archive.")
+    return posixpath.normpath(name)
+
+
+def extract_sshx_binary(data: bytes) -> bytes:
+    """Return the single regular root-level `sshx` file from the archive.
+
+    Accepts `sshx` and `./sshx`, and tolerates harmless directory/metadata
+    entries such as macOS AppleDouble `._sshx` files. Never extracts the archive
+    to disk, and rejects links, devices, traversal, duplicates, and non-ELF data.
+    """
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            members = archive.getmembers()
+            if len(members) > MAX_MEMBERS:
+                raise ArchiveError("SSHX archive contains too many entries.")
+            candidates = []
+            for member in members:
+                normalized = _safe_name(member.name)
+                if member.size > MAX_DOWNLOAD:
+                    raise ArchiveError("SSHX archive entry exceeds the safety limit.")
+                if normalized == "sshx":
+                    candidates.append(member)
+            if len(candidates) != 1:
+                raise ArchiveError("Expected exactly one root-level sshx file in archive.")
+            member = candidates[0]
+            if not member.isfile():
+                raise ArchiveError("SSHX entry is not a regular file.")
+            source = archive.extractfile(member)
+            if source is None:
+                raise ArchiveError("Could not read SSHX binary.")
+            binary = source.read(MAX_DOWNLOAD + 1)
+    except tarfile.TarError as exc:
+        raise ArchiveError("Downloaded file is not a valid tar.gz archive.") from exc
+    if len(binary) > MAX_DOWNLOAD:
+        raise ArchiveError("SSHX binary exceeds the safety limit.")
+    if not binary.startswith(ELF_MAGIC):
+        raise ArchiveError("SSHX entry is not a Linux ELF binary.")
+    return binary
 
 
 def main() -> None:
@@ -45,26 +99,20 @@ def main() -> None:
         data = response.read(MAX_DOWNLOAD + 1)
     if len(data) > MAX_DOWNLOAD:
         raise SystemExit("SSHX download exceeded the safety limit.")
-    digest = hashlib.sha256(data).hexdigest()
+    try:
+        binary = extract_sshx_binary(data)
+    except ArchiveError as exc:
+        raise SystemExit(f"Unexpected SSHX archive layout; refusing extraction. {exc}") from exc
+    digest = hashlib.sha256(binary).hexdigest()
     if expected and digest != expected:
         raise SystemExit("SSHX SHA-256 mismatch; refusing the download.")
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-        members = archive.getmembers()
-        if len(members) != 1 or members[0].name != "sshx" or not members[0].isfile():
-            raise SystemExit("Unexpected SSHX archive layout; refusing extraction.")
-        if members[0].size > MAX_DOWNLOAD:
-            raise SystemExit("SSHX binary exceeds the safety limit.")
-        source = archive.extractfile(members[0])
-        if source is None:
-            raise SystemExit("Could not read SSHX binary.")
-        binary = source.read(MAX_DOWNLOAD + 1)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     temporary = args.output.with_suffix(".tmp")
     temporary.write_bytes(binary)
     temporary.chmod(0o755)
     temporary.replace(args.output)
     args.output.with_suffix(".sha256").write_text(f"{digest}  sshx\n")
-    print(f"SSHX SHA-256: {digest}")
+    print(f"SSHX binary SHA-256: {digest}")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ Use a dedicated **Ubuntu 22.04+ / Debian 12+** VPS with systemd, root/sudo acces
 Run this on the VPS (one shell command):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/vps-deploy-ment/arena/43b52dc0-vps-deploy-ment/install.sh -o /tmp/fier-install.sh && sudo bash /tmp/fier-install.sh
+curl -fsSL https://raw.githubusercontent.com/siddhantpashte123-hub/vps-deploy-ment/main/install.sh -o /tmp/fier-install.sh && sudo bash /tmp/fier-install.sh
 ```
 
 The installer will:
