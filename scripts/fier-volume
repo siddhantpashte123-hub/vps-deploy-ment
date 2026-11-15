@@ -1,0 +1,173 @@
+#!/usr/bin/python3
+"""Root-only, narrow helper for fixed-size ext4 VPS home filesystems.
+
+Installed root:root 0755. The unprivileged bot may invoke only this executable
+through its sudoers entry. No user-supplied paths or shell strings are accepted.
+The bot's docker-group membership is already host-root-equivalent: use a dedicated host.
+"""
+import json
+import os
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+
+STATE_ROOT = "/var/lib/fier"
+DISKS = STATE_ROOT + "/disks"
+MOUNTS = STATE_ROOT + "/mounts"
+ID_RE = re.compile(r"fier-[a-f0-9]{12}\Z")
+MAX_GB = 256
+RESERVE_BYTES = 1024**3
+
+
+def fail(message: str) -> None:
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+
+def run(*args: str) -> str:
+    result = subprocess.run(args, capture_output=True, text=True, timeout=150, check=False)
+    if result.returncode:
+        raise RuntimeError(f"{os.path.basename(args[0])} failed: {result.stderr.strip()[:200]}")
+    return result.stdout
+
+
+def safe_dir(path: str, create: bool = False) -> None:
+    if create and not os.path.lexists(path):
+        os.mkdir(path, 0o700)
+    st = os.lstat(path)
+    import stat
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
+        fail("Refusing unsafe/root-unowned storage directory.")
+
+
+def paths(instance_id: str) -> tuple[str, str]:
+    if not ID_RE.fullmatch(instance_id):
+        fail("Invalid VPS ID.")
+    safe_dir(STATE_ROOT)
+    safe_dir(DISKS, create=True)
+    safe_dir(MOUNTS, create=True)
+    return DISKS + "/" + instance_id + ".img", MOUNTS + "/" + instance_id
+
+
+def mounted(mount: str) -> bool:
+    with open("/proc/self/mountinfo", encoding="utf-8") as handle:
+        for line in handle:
+            fields = line.split()
+            decoded = fields[4].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+            if decoded == mount:
+                return True
+    return False
+
+
+def check() -> None:
+    if os.geteuid() != 0:
+        fail("Helper must run as root through the installed sudoers rule.")
+    safe_dir(STATE_ROOT)
+    for binary in ("fallocate", "mkfs.ext4", "mount", "umount", "mountpoint"):
+        if not shutil.which(binary):
+            fail("Missing required storage utility: " + binary)
+    pwd.getpwnam("fier")
+    print("ok")
+
+
+def create(instance_id: str, size_raw: str) -> None:
+    if not re.fullmatch(r"[0-9]{1,3}", size_raw):
+        fail("Invalid disk size.")
+    size = int(size_raw)
+    if not 1 <= size <= MAX_GB:
+        fail("Disk size outside helper limits.")
+    image, mount = paths(instance_id)
+    if os.path.lexists(image) or os.path.lexists(mount):
+        fail("Disk already exists; refusing to overwrite it.")
+    if shutil.disk_usage(STATE_ROOT).free < size * 1024**3 + RESERVE_BYTES:
+        fail("Insufficient free host disk space (1 GiB safety reserve required).")
+    created_image = False
+    created_mount = False
+    attached = False
+    try:
+        fd = os.open(image, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+        os.close(fd)
+        created_image = True
+        run("fallocate", "-l", f"{size}G", image)
+        run("mkfs.ext4", "-F", "-q", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0", image)
+        os.mkdir(mount, 0o700)
+        created_mount = True
+        run("mount", "-o", "loop,nosuid,nodev", image, mount)
+        attached = True
+        # Ubuntu's normal home skeleton; no host secrets are copied.
+        run("cp", "-a", "/etc/skel/.", mount + "/")
+        os.chown(mount, 1000, 1000)
+        os.chmod(mount, 0o700)
+        for name in os.listdir(mount):
+            path = mount + "/" + name
+            st = os.lstat(path)
+            os.lchown(path, 1000, 1000)
+            if not os.path.islink(path) and os.path.isdir(path):
+                os.chmod(path, st.st_mode & 0o777)
+        print(mount)
+    except Exception:
+        if attached:
+            subprocess.run(["umount", mount], check=False, capture_output=True)
+        if created_mount and not mounted(mount):
+            os.rmdir(mount)
+        if created_image:
+            os.unlink(image)
+        raise
+
+
+def mount_existing(instance_id: str) -> None:
+    image, mount = paths(instance_id)
+    if not os.path.isfile(image) or os.path.islink(image) or os.stat(image).st_uid != 0:
+        fail("Disk image missing or unsafe.")
+    safe_dir(mount)
+    if not mounted(mount):
+        run("mount", "-o", "loop,nosuid,nodev", image, mount)
+    print(mount)
+
+
+def delete(instance_id: str) -> None:
+    image, mount = paths(instance_id)
+    if os.path.lexists(mount):
+        safe_dir(mount)
+        if mounted(mount):
+            run("umount", mount)
+        os.rmdir(mount)
+    if os.path.lexists(image):
+        st = os.lstat(image)
+        import stat
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
+            fail("Refusing to delete an unsafe disk image.")
+        os.unlink(image)
+    print("ok")
+
+
+def main() -> None:
+    os.umask(0o077)
+    args = sys.argv[1:]
+    if args and args[0] == "check":
+        check()
+        return
+    if os.geteuid() != 0:
+        fail("Helper must run as root.")
+    if len(args) not in (2, 3) or args[0] not in {"create", "mount", "delete", "info"}:
+        fail("Usage: fier-volume create ID GB | mount ID | delete ID | info ID | check ID")
+    try:
+        if args[0] == "create":
+            if len(args) != 3:
+                fail("create requires a disk size.")
+            create(args[1], args[2])
+        elif args[0] == "mount":
+            mount_existing(args[1])
+        elif args[0] == "delete":
+            delete(args[1])
+        else:
+            image, mount = paths(args[1])
+            print(json.dumps({"image": image, "mount": mount, "mounted": mounted(mount)}))
+    except (OSError, RuntimeError, subprocess.TimeoutExpired, KeyError) as exc:
+        fail(str(exc)[:400])
+
+
+if __name__ == "__main__":
+    main()
