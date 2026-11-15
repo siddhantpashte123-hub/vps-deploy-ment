@@ -15,7 +15,7 @@ def settings(tmp_path: Path) -> Settings:
     return Settings(
         token="x" * 60,
         client_id=None,
-        allowed_guild_id=None,
+        allowed_guild_id=987654321,
         admin_ids=frozenset(),
         data_dir=tmp_path,
         images={"ubuntu-24.04": "fier-vps:local", "debian-12": "fier-vps:debian-12"},
