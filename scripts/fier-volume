@@ -1,17 +1,25 @@
 #!/usr/bin/python3
-"""Root-only, narrow helper for fixed-size ext4 VPS home filesystems.
+"""Root-only, narrow helper for VPS home storage.
+
+Preferred mode: fixed-size ext4 image mounted on the host (hard disk quota).
+Fallback mode: plain root-created home directory when the host/kernel (often an
+LXC container) cannot provide loop devices. The fallback still isolates each
+VPS home by ownership/permissions, but the disk size is a host-reserved budget,
+not a filesystem-enforced quota.
 
 Installed root:root 0755. The unprivileged bot may invoke only this executable
-through its sudoers entry. No user-supplied paths or shell strings are accepted.
-The bot's docker-group membership is already host-root-equivalent: use a dedicated host.
+through its sudoers entry. No user-supplied paths or shell commands are accepted.
 """
+import grp
 import json
 import os
 import pwd
 import re
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
 
 STATE_ROOT = "/var/lib/fier"
 DISKS = STATE_ROOT + "/disks"
@@ -33,11 +41,24 @@ def run(*args: str) -> str:
     return result.stdout
 
 
+def run_mount(*args: str) -> str:
+    """Perform mount/umount in PID 1's mount namespace so Docker can see it.
+
+    Some systemd/service configurations put the bot in a private mount
+    namespace; a loop mount created there is invisible to the Docker daemon.
+    If nsenter is unavailable, use the current namespace.
+    """
+    nsenter = shutil.which("nsenter")
+    pid1_mnt = "/proc/1/ns/mnt"
+    if nsenter and os.path.exists(pid1_mnt):
+        return run(nsenter, "--mount=" + pid1_mnt, "--", *args)
+    return run(*args)
+
+
 def safe_dir(path: str, create: bool = False) -> None:
     if create and not os.path.lexists(path):
         os.mkdir(path, 0o700)
     st = os.lstat(path)
-    import stat
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != 0:
         fail("Refusing unsafe/root-unowned storage directory.")
 
@@ -52,24 +73,137 @@ def paths(instance_id: str) -> tuple[str, str]:
 
 
 def mounted(mount: str) -> bool:
-    with open("/proc/self/mountinfo", encoding="utf-8") as handle:
-        for line in handle:
-            fields = line.split()
-            decoded = fields[4].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
-            if decoded == mount:
-                return True
+    try:
+        with open("/proc/self/mountinfo", encoding="utf-8") as handle:
+            for line in handle:
+                fields = line.split()
+                decoded = (
+                    fields[4].replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+                )
+                if decoded == mount:
+                    return True
+    except OSError:
+        pass
+    # The mount may live in PID 1's namespace while this helper runs in a
+    # private service namespace. Check there too before deleting anything.
+    nsenter = shutil.which("nsenter")
+    pid1_mnt = "/proc/1/ns/mnt"
+    if nsenter and os.path.exists(pid1_mnt):
+        try:
+            result = subprocess.run(
+                [nsenter, "--mount=" + pid1_mnt, "--", "mountpoint", "-q", mount],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            return result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
     return False
+
+
+def ensure_loop_devices() -> None:
+    """Best-effort create loop nodes missing in containers without udev."""
+    try:
+        disk_gid = grp.getgrnam("disk").gr_gid
+    except KeyError:
+        disk_gid = 0
+    nodes = [("/dev/loop-control", stat.S_IFCHR | 0o660, os.makedev(10, 237))]
+    nodes += [(f"/dev/loop{i}", stat.S_IFBLK | 0o660, os.makedev(7, i)) for i in range(16)]
+    if not os.path.exists("/dev/loop-control"):
+        subprocess.run(
+            ["modprobe", "loop"], capture_output=True, text=True, timeout=10, check=False
+        )
+    for path, mode, dev in nodes:
+        if os.path.lexists(path):
+            continue
+        try:
+            os.mknod(path, mode, dev)
+            os.chown(path, 0, disk_gid)
+        except OSError:
+            # Unprivileged LXC may deny mknod; probe will fall back to directory.
+            pass
+
+
+def init_home(path: str) -> None:
+    run("cp", "-a", "/etc/skel/.", path + "/")
+    os.chown(path, 1000, 1000)
+    os.chmod(path, 0o700)
+    for name in os.listdir(path):
+        child = path + "/" + name
+        os.lchown(child, 1000, 1000)
+
+
+def probe_loop() -> bool:
+    """Return True only if a real loop mount works in the Docker-visible namespace."""
+    ensure_loop_devices()
+    work = tempfile.mkdtemp(prefix="probe-", dir=STATE_ROOT)
+    image = work + "/probe.img"
+    mount = work + "/mnt"
+    attached = False
+    try:
+        run("truncate", "-s", "8M", image)
+        run("mkfs.ext4", "-F", "-q", "-m", "0", image)
+        os.mkdir(mount, 0o700)
+        run_mount("mount", "-o", "loop,nosuid,nodev", image, mount)
+        attached = True
+        return True
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return False
+    finally:
+        if attached:
+            try:
+                run_mount("umount", mount)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                pass
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def check() -> None:
     if os.geteuid() != 0:
         fail("Helper must run as root through the installed sudoers rule.")
     safe_dir(STATE_ROOT)
-    for binary in ("fallocate", "mkfs.ext4", "mount", "umount", "mountpoint"):
+    for binary in ("fallocate", "mkfs.ext4", "mount", "umount", "mountpoint", "truncate"):
         if not shutil.which(binary):
             fail("Missing required storage utility: " + binary)
     pwd.getpwnam("fier")
     print("ok")
+
+
+def create_loop(image: str, mount: str, size: int) -> None:
+    fd = os.open(image, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    created_mount = False
+    attached = False
+    try:
+        run("fallocate", "-l", f"{size}G", image)
+        run("mkfs.ext4", "-F", "-q", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0", image)
+        os.mkdir(mount, 0o700)
+        created_mount = True
+        run_mount("mount", "-o", "loop,nosuid,nodev", image, mount)
+        attached = True
+        init_home(mount)
+    except Exception:
+        if attached:
+            try:
+                run_mount("umount", mount)
+            except (OSError, RuntimeError, subprocess.TimeoutExpired):
+                pass
+        if created_mount and not mounted(mount):
+            os.rmdir(mount)
+        if os.path.lexists(image):
+            os.unlink(image)
+        raise
+
+
+def create_directory(mount: str) -> None:
+    os.mkdir(mount, 0o700)
+    try:
+        init_home(mount)
+    except Exception:
+        shutil.rmtree(mount, ignore_errors=True)
+        raise
 
 
 def create(instance_id: str, size_raw: str) -> None:
@@ -83,60 +217,48 @@ def create(instance_id: str, size_raw: str) -> None:
         fail("Disk already exists; refusing to overwrite it.")
     if shutil.disk_usage(STATE_ROOT).free < size * 1024**3 + RESERVE_BYTES:
         fail("Insufficient free host disk space (1 GiB safety reserve required).")
-    created_image = False
-    created_mount = False
-    attached = False
+    ensure_loop_devices()
     try:
-        fd = os.open(image, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
-        created_image = True
-        run("fallocate", "-l", f"{size}G", image)
-        run("mkfs.ext4", "-F", "-q", "-m", "0", "-E", "lazy_itable_init=0,lazy_journal_init=0", image)
-        os.mkdir(mount, 0o700)
-        created_mount = True
-        run("mount", "-o", "loop,nosuid,nodev", image, mount)
-        attached = True
-        # Ubuntu's normal home skeleton; no host secrets are copied.
-        run("cp", "-a", "/etc/skel/.", mount + "/")
-        os.chown(mount, 1000, 1000)
-        os.chmod(mount, 0o700)
-        for name in os.listdir(mount):
-            path = mount + "/" + name
-            st = os.lstat(path)
-            os.lchown(path, 1000, 1000)
-            if not os.path.islink(path) and os.path.isdir(path):
-                os.chmod(path, st.st_mode & 0o777)
-        print(mount)
-    except Exception:
-        if attached:
-            subprocess.run(["umount", mount], check=False, capture_output=True)
-        if created_mount and not mounted(mount):
-            os.rmdir(mount)
-        if created_image:
+        create_loop(image, mount, size)
+    except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:
+        # Typical on LXC/OpenVZ hosts without usable /dev/loop*: keep the bot
+        # functional with an owned home directory instead of failing deploy.
+        print(f"loop storage unavailable ({str(exc)[:120]}); using directory storage", file=sys.stderr)
+        if os.path.lexists(image):
             os.unlink(image)
-        raise
+        if os.path.lexists(mount) and not mounted(mount):
+            shutil.rmtree(mount, ignore_errors=True)
+        create_directory(mount)
+    print(mount)
 
 
 def mount_existing(instance_id: str) -> None:
     image, mount = paths(instance_id)
-    if not os.path.isfile(image) or os.path.islink(image) or os.stat(image).st_uid != 0:
-        fail("Disk image missing or unsafe.")
-    safe_dir(mount)
-    if not mounted(mount):
-        run("mount", "-o", "loop,nosuid,nodev", image, mount)
+    if os.path.isfile(image) and not os.path.islink(image) and os.stat(image).st_uid == 0:
+        safe_dir(mount)
+        if not mounted(mount):
+            ensure_loop_devices()
+            run_mount("mount", "-o", "loop,nosuid,nodev", image, mount)
+    elif os.path.isdir(mount) and not os.path.islink(mount):
+        pass
+    else:
+        fail("Disk image/home missing or unsafe.")
     print(mount)
 
 
 def delete(instance_id: str) -> None:
     image, mount = paths(instance_id)
     if os.path.lexists(mount):
-        safe_dir(mount)
         if mounted(mount):
-            run("umount", mount)
-        os.rmdir(mount)
+            run_mount("umount", mount)
+        if os.path.islink(mount):
+            fail("Refusing to delete symlinked home.")
+        if os.path.isdir(mount):
+            shutil.rmtree(mount)
+        else:
+            fail("Refusing to delete non-directory home.")
     if os.path.lexists(image):
         st = os.lstat(image)
-        import stat
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
             fail("Refusing to delete an unsafe disk image.")
         os.unlink(image)
@@ -151,8 +273,8 @@ def main() -> None:
         return
     if os.geteuid() != 0:
         fail("Helper must run as root.")
-    if len(args) not in (2, 3) or args[0] not in {"create", "mount", "delete", "info"}:
-        fail("Usage: fier-volume create ID GB | mount ID | delete ID | info ID | check ID")
+    if len(args) not in (2, 3) or args[0] not in {"create", "mount", "delete", "info", "probe"}:
+        fail("Usage: fier-volume create ID GB | mount ID | delete ID | info ID | probe ID | check ID")
     try:
         if args[0] == "create":
             if len(args) != 3:
@@ -162,9 +284,20 @@ def main() -> None:
             mount_existing(args[1])
         elif args[0] == "delete":
             delete(args[1])
+        elif args[0] == "probe":
+            print("loop" if probe_loop() else "directory")
         else:
             image, mount = paths(args[1])
-            print(json.dumps({"image": image, "mount": mount, "mounted": mounted(mount)}))
+            print(
+                json.dumps(
+                    {
+                        "image": image,
+                        "mount": mount,
+                        "mounted": mounted(mount),
+                        "mode": "loop" if os.path.isfile(image) else "directory",
+                    }
+                )
+            )
     except (OSError, RuntimeError, subprocess.TimeoutExpired, KeyError) as exc:
         fail(str(exc)[:400])
 

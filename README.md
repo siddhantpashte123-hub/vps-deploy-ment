@@ -47,7 +47,7 @@ If you already uploaded/cloned this repository, the local equivalent is:
 sudo bash install.sh
 ```
 
-Re-running the installer preserves the environment file and existing VPS inventory/disks. Press Enter at the token prompt to keep the existing token. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
+Re-running the installer preserves the environment file and existing VPS inventory/disks. Press Enter at the token prompt to keep the existing token. For an unattended repair that reuses the saved token, run `sudo FIER_REPAIR=1 bash install.sh`. Review the script before running it, as with any root installer. To install a different branch deliberately: `sudo FIER_REF=main bash install.sh` (only after that branch contains the code).
 
 ## 3. Use it
 
@@ -87,7 +87,7 @@ If several of your VPSes match `!delete 1 1 1`, nothing is deleted; the bot list
 - **Deploy:** server administrators by default, plus `FIER_ADMIN_IDS` and optionally `FIER_DEPLOY_ROLE_ID`.
 - **Manage/delete:** only the owner, server administrators, and configured bot admins; always scoped to the same guild.
 - Defaults: max **2 VPSes/user**, **20 total**, plans up to **4 GiB RAM / 4 CPU / 20 GiB disk**.
-- RAM/CPU reservations are checked across the host before deployment. Disk images are fully allocated with `fallocate`; a 1 GiB safety reserve is required.
+- RAM/CPU reservations are checked across the host before deployment. Where loop mounts work, disk images are fully allocated with `fallocate` and act as hard filesystem quotas; a 1 GiB safety reserve is required. On hosts without usable loop devices (common in LXC), FIER falls back to per-VPS owned directories: the disk argument is still a reserved host budget, but not a hard filesystem quota. `python -m fier doctor` prints the active storage mode.
 - Edit `/etc/fier/fier.env` to change limits or allow a deploy role, then `sudo systemctl restart fier`. See `.env.example`.
 
 ### Inside the terminal
@@ -130,6 +130,8 @@ sudo /opt/fier/.venv/bin/python -m fier doctor --env-file /etc/fier/fier.env
 | “Deploying is restricted” | You must be a server administrator/configured admin, or have the configured deploy role. |
 | Docker unavailable | `systemctl status docker`; service user has the `docker` supplementary group; run doctor. |
 | Disk helper denied | `/etc/sudoers.d/fier` and root-owned `/usr/local/libexec/fier-volume` installed? Re-run installer. |
+| `mount failed: No such file or directory` / loop errors | Usually missing `/dev/loop*` inside LXC. Re-run the installer; it creates loop nodes when allowed, mounts in PID 1's namespace, and otherwise falls back to directory storage. |
+| `Permission denied` executing `/opt/fier/.venv/bin/python` | Re-run the installer; it makes the root-owned app/venv traversable by the `fier` service user. |
 | Not enough RAM/CPU/disk | Delete unused VPSes or adjust host budgets only if the host actually has capacity. |
 | SSHX times out | VPS running? Outbound HTTPS/gRPC to `sshx.io` allowed? Third-party service available? Stop/start and retry. |
 | Container missing after manual Docker cleanup | Use Reinstall (wipes data) or Delete. FIER refuses to control unlabeled containers. |

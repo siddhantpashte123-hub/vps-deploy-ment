@@ -47,6 +47,18 @@ def test_token_validation_api():
             validate_token("a" * 60)
 
 
+def test_setup_keep_existing_token_does_not_prompt(tmp_path, monkeypatch):
+    env = tmp_path / "fier.env"
+    env.write_text("DISCORD_TOKEN=" + "a" * 60 + "\n")
+    monkeypatch.setattr("fier.cli.validate_token", lambda token: {"id": "123", "username": "FIER"})
+    monkeypatch.setattr("fier.cli.getpass.getpass", lambda prompt: pytest.fail("prompted"))
+    from fier.cli import setup
+
+    setup(env, keep_existing=True)
+    assert dotenv_values(env)["DISCORD_TOKEN"] == "a" * 60
+    assert dotenv_values(env)["FIER_CLIENT_ID"] == "123"
+
+
 def test_settings_repr_hides_token(monkeypatch):
     monkeypatch.setenv("DISCORD_TOKEN", "sensitive-token-value")
     monkeypatch.setenv("FIER_ADMIN_IDS", "123,456")
