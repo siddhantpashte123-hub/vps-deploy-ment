@@ -1,14 +1,19 @@
 # NOIR — Discord VPS Deploy Bot
 
-Admin-created Ubuntu 24.04 / Debian 12 development containers, controlled from your locked Discord server **and directly in bot DMs**:
+Admin-created Ubuntu 24.04 / Ubuntu 22.04 / Debian 12 development containers, controlled from your locked Discord server **and directly in bot DMs** (both `!` prefix and `/` slash commands):
 
 ```text
-!deploy 1 1 1 @user   admin only: RAM (GiB) · CPU cores · disk (GiB), then choose OS
-!deploy 1 1 1         admin only: deploy for yourself, then choose OS
-!status               admin only: live Host Node resource dashboard (CPU, RAM, Disk, Fleet)
-!panel                admin only: post an interactive NOIR Cloud Panel (My VPS + Control in DM)
-!delete @user         admin only: pick one of that member's VPSes, then confirm
-!manage               server or bot DMs: Start · Stop · Console · Stats · Reinstall · Refresh
+!deploy 1 1 1 @user [30d]       admin only: RAM · CPU · disk · optional @user & expiry timer
+!status                         admin only: live Host Node dashboard (CPU, RAM, Disk, Fleet)
+!list [@user]                   admin only: paginated Fleet Browser + quick-manage selector
+!suspend <id> [reason]          admin only: stop & lock a VPS while keeping /home/noir safe
+!unsuspend <id>                 admin only: unlock & start a suspended VPS
+!resize <id> RAM CPU DISK       admin only: live plan upgrade without wiping /home/noir
+!renew <id> <30d|never>         admin only: extend or clear automatic expiry timer
+!panel                          admin only: post an interactive NOIR Cloud Panel hub card
+!delete @user                   admin only: pick one of that member's VPSes, then confirm
+!manage                         server or DMs: Start · Stop · Restart · Console · Backup · Restore · Reinstall
+!transfer <id> @user            owner or admin: transfer VPS ownership to another member
 ```
 
 The installer installs dependencies, builds both VPS images, **asks for your bot token with hidden input**, validates it with Discord, then asks for the **one Discord server (guild) ID** the bot may stay in, starts a systemd service, and waits for the bot to report ready. The bot is locked to that server and automatically leaves any other server.
@@ -77,11 +82,14 @@ The management panel has:
 |---|---|
 | **Start** | Start the existing container and refresh live metrics in-place; files are preserved. |
 | **Stop** | Stop processes and update the card in-place; the home disk is preserved. |
+| **Restart** | Cleanly restart the container in-place without losing `/home/noir` files. |
 | **Console** | Open a real browser terminal through `sshx.io` as **root inside the VPS container**; the capability link is sent only to you as an ephemeral Discord response. |
 | **Stats** | Refresh live container uptime, CPU %, RAM MB, and `/home/noir` disk usage in-place. |
-| **Reinstall** | Choose the replacement OS (Ubuntu 24.04 / Debian 12), confirm, then **erase all files** and recreate a fresh root container with the same ID/resources/owner. |
+| **Backup** | Save a compressed `.tar.gz` snapshot of `/home/noir` on the host. |
+| **Restore** | Confirm first, then restore `/home/noir` from your latest saved snapshot. |
+| **Reinstall** | Choose the replacement OS (Ubuntu 24.04 / Ubuntu 22.04 / Debian 12), confirm, then **erase all files** and recreate a fresh root container with the same ID/resources/owner. |
 | **Refresh** | Reconcile the panel with Docker and live telemetry. |
-| **Delete** | Confirm first, then remove the container and its disk permanently. |
+| **Delete** | Confirm first, then remove the container, its disk, and saved snapshot permanently. |
 | **Open in DM** | Send a live personal control console straight to your bot DMs. |
 
 Other commands (work in the locked server **and in bot DMs** for members/admins of that server):

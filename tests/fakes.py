@@ -80,6 +80,25 @@ class FakeBackend:
         self.items[instance_id]["status"] = "stopped"
         self.events.append("stop:" + instance_id)
 
+    def restart(self, instance_id: str) -> None:
+        self.items[instance_id]["status"] = "running"
+        self.events.append("restart:" + instance_id)
+
+    def resize_disk(self, instance_id: str, disk_gb: int) -> None:
+        self.events.append(f"resize-disk:{instance_id}:{disk_gb}")
+
+    def backup_home(self, instance_id: str) -> int:
+        self.items[instance_id]["backed_up"] = True
+        self.events.append("backup:" + instance_id)
+        return 4096
+
+    def restore_home(self, instance_id: str) -> None:
+        if not self.items.get(instance_id, {}).get("backed_up"):
+            from noir.errors import BackendError
+
+            raise BackendError("Disk helper: No saved backup exists for this VPS yet.")
+        self.events.append("restore:" + instance_id)
+
     def remove_all(self, instance_id: str) -> None:
         self.events.append("remove:" + instance_id)
         if self.fail_cleanup:

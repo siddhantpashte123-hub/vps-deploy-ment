@@ -390,6 +390,25 @@ class DockerBackend:
         except (DockerException, OSError) as exc:
             raise BackendError("Docker could not stop the VPS.") from exc
 
+    def restart(self, instance_id: str) -> None:
+        container = self.get(instance_id)
+        if container is None:
+            raise UserError("The container is missing. Reinstall this VPS to recreate it.")
+        try:
+            container.restart(timeout=15)
+        except (DockerException, OSError) as exc:
+            raise BackendError("Docker could not restart the VPS.") from exc
+
+    def resize_disk(self, instance_id: str, disk_gb: int) -> None:
+        self._helper("resize", instance_id, disk_gb)
+
+    def backup_home(self, instance_id: str) -> int:
+        out = self._helper("backup", instance_id)
+        return int(out) if out.isdigit() else 0
+
+    def restore_home(self, instance_id: str) -> None:
+        self._helper("restore", instance_id)
+
     def remove_all(self, instance_id: str) -> None:
         container = self.get(instance_id)
         if container is not None:

@@ -137,7 +137,11 @@ async def test_deploy_without_target_offers_os_for_self(bot, guild, admin_member
     assert isinstance(view, DeployOSView)
     assert view.owner_id == actor.user_id
     assert view.specs == Specs(1, 2, 3)
-    assert {option.value for option in view.select.options} == {"ubuntu-24.04", "debian-12"}
+    assert {option.value for option in view.select.options} == {
+        "ubuntu-24.04",
+        "ubuntu-22.04",
+        "debian-12",
+    }
     assert view.select.max_values == 1
     assert f"<@{actor.user_id}>" in str(ctx.send.call_args.kwargs["embed"].to_dict())
     assert backend.events == []
@@ -642,3 +646,81 @@ async def test_deploy_failure_keeps_os_and_owner_context(
     assert "Debian 12" in text
     assert f"<@{TARGET_ID}>" in text
     assert view.message.edit.call_args.kwargs["view"] is None
+
+
+async def test_deploy_with_duration_and_admin_hosting_commands(
+    bot, guild, admin_member, target_member, manager, actor, store
+):
+    ctx = await invoke(bot, guild, admin_member, "deploy", f"1 1 2 <@{TARGET_ID}> 14d")
+    deploy_view = ctx.send.call_args.kwargs["view"]
+    assert deploy_view.owner_id == TARGET_ID
+    assert deploy_view.expires_at is not None
+
+    interaction = make_interaction(admin_member, actor.guild_id, values=["ubuntu-22.04"])
+    await deploy_view.select.callback(interaction)
+    created = store.list()[0]
+    assert created.os == "ubuntu-22.04"
+    assert created.expires_at == deploy_view.expires_at
+
+    # Fleet browser (!list)
+    list_ctx = await invoke(bot, guild, admin_member, "list")
+    fleet_msg = list_ctx.send.call_args.kwargs
+    assert "file" not in fleet_msg
+    assert fleet_msg["embed"].title.startswith("Fleet Browser")
+    assert created.id in fleet_msg["embed"].description
+
+    # Suspend & Unsuspend
+    susp_ctx = await invoke(bot, guild, admin_member, "suspend", f"{created.id} Maintenance")
+    assert "Suspended" in susp_ctx.send.call_args.kwargs["embed"].title
+    assert store.get(created.id).is_suspended is True
+
+    unsusp_ctx = await invoke(bot, guild, admin_member, "unsuspend", created.id)
+    assert "Unsuspended" in unsusp_ctx.send.call_args.kwargs["embed"].title
+    assert store.get(created.id).status == "running"
+
+    # Live resize & renew
+    await invoke(bot, guild, admin_member, "resize", f"{created.id} 2 2 4")
+    assert store.get(created.id).specs == Specs(2, 2, 4)
+
+    await invoke(bot, guild, admin_member, "renew", f"{created.id} never")
+    assert store.get(created.id).expires_at is None
+
+
+async def test_user_backup_restore_restart_transfer_and_audit_channel(
+    settings, manager, backend, actor, guild, admin_member, target_member
+):
+    log_channel = SimpleNamespace(send=AsyncMock())
+    audited_bot = build_bot(replace(settings, log_channel_id=555666777888999000), manager, backend)
+    audited_bot.get_channel = Mock(return_value=log_channel)
+
+    inst = await manager.deploy(actor, Specs(1, 1, 2), owner_id=TARGET_ID)
+    owner = make_member(TARGET_ID, guild, admin=False)
+
+    # Backup & Restore commands
+    await invoke(audited_bot, guild, owner, "backup", inst.id)
+    assert manager.store.get(inst.id).backup_at is not None
+
+    restore_ctx = await invoke(audited_bot, guild, owner, "restore", inst.id)
+    confirm = restore_ctx.send.call_args.kwargs["view"]
+    assert isinstance(confirm, ConfirmView)
+    press = make_interaction(owner, actor.guild_id)
+    await confirm.confirm.callback(press)
+
+    # Restart button on ManageView
+    panel = ManageView(
+        audited_bot, Actor(TARGET_ID, actor.guild_id, False), [manager.store.get(inst.id)]
+    )
+    assert all(getattr(c, "emoji", None) is None for c in panel.children)
+    restart_press = make_interaction(owner, actor.guild_id)
+    await panel.restart.callback(restart_press)
+
+    # Owner transfers VPS to another member
+    new_owner_id = 333444555666777888
+    new_member = make_member(new_owner_id, guild, admin=False)
+    guild.get_member = Mock(side_effect=lambda uid: new_member if uid == new_owner_id else owner)
+    await invoke(audited_bot, guild, owner, "transfer", f"{inst.id} <@{new_owner_id}>")
+    assert manager.store.get(inst.id).owner_id == new_owner_id
+    assert log_channel.send.await_count >= 4
+    for call in log_channel.send.await_args_list:
+        assert "file" not in call.kwargs
+        assert "> **Event**" in call.kwargs["embed"].description

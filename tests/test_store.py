@@ -81,5 +81,26 @@ def test_legacy_inventory_migrates_to_ubuntu_without_losing_rows(tmp_path):
         assert reopened.get("noir-a1b2c3d4e5f6").os == "debian-12"
         columns = [row[1] for row in reopened._db.execute("PRAGMA table_info(instances)")]
         assert columns.count("os") == 1
+        assert {"expires_at", "suspended_reason", "backup_at"}.issubset(set(columns))
     finally:
         reopened.close()
+
+
+def test_suspend_expiry_backup_and_spec_fields_persist(store):
+    inst = store.add(sample_instance(os="ubuntu-22.04"))
+    updated = store.update(
+        inst.id,
+        status="suspended",
+        suspended_reason="Abuse",
+        expires_at="2027-01-01T00:00:00+00:00",
+        backup_at="2026-11-14T12:00:00+00:00",
+        ram_gb=4,
+        cpu=2,
+        disk_gb=10,
+        owner_id=99,
+    )
+    assert updated.is_suspended is True
+    assert updated.suspended_reason == "Abuse"
+    assert updated.expires_at == "2027-01-01T00:00:00+00:00"
+    assert updated.backup_at == "2026-11-14T12:00:00+00:00"
+    assert (updated.ram_gb, updated.cpu, updated.disk_gb, updated.owner_id) == (4, 2, 10, 99)

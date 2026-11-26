@@ -10,7 +10,16 @@ from typing import Protocol
 
 from .config import Settings
 from .errors import AccessDenied, BackendError, UserError
-from .models import Actor, HostStatus, Instance, LiveStats, Specs, utc_now, valid_id
+from .models import (
+    Actor,
+    HostStatus,
+    Instance,
+    LiveStats,
+    Specs,
+    future_iso,
+    utc_now,
+    valid_id,
+)
 from .os_catalog import DEFAULT_OS, os_choice
 from .store import Store
 
@@ -70,10 +79,11 @@ class Manager:
             raise UserError("Use a valid VPS ID, for example `noir-a1b2c3d4e5f6`.")
         return self.authorize(actor, await asyncio.to_thread(self.store.get, instance_id))
 
-    async def list(self, actor: Actor) -> list[Instance]:
-        return await asyncio.to_thread(
-            self.store.list, actor.guild_id, None if actor.is_admin else actor.user_id
-        )
+    async def list(self, actor: Actor, *, owner_id: int | None = None) -> list[Instance]:
+        if owner_id is not None and not actor.is_admin and owner_id != actor.user_id:
+            raise AccessDenied("Only admins can list another member's VPSes.")
+        filter_owner = owner_id if actor.is_admin else actor.user_id
+        return await asyncio.to_thread(self.store.list, actor.guild_id, filter_owner)
 
     async def matching_own(self, actor: Actor, specs: Specs) -> list[Instance]:
         instances = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
@@ -102,6 +112,7 @@ class Manager:
         *,
         owner_id: int | None = None,
         os_key: str = DEFAULT_OS,
+        expires_at: str | None = None,
     ) -> Instance:
         if not actor.is_admin:
             raise AccessDenied("Only admins can create VPSes.")
@@ -140,6 +151,7 @@ class Manager:
                 created_at=now,
                 updated_at=now,
                 os=os_key,
+                expires_at=expires_at,
             )
             await self._emit(on_progress, "reserve", 15)
             await asyncio.to_thread(self.store.add, instance)
@@ -200,7 +212,11 @@ class Manager:
                 await asyncio.to_thread(self.backend.remove_all, instance_id)
                 await asyncio.to_thread(self.store.delete, instance_id)
                 return instance
+            if instance.is_suspended and not actor.is_admin:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
             if action == "reinstall":
+                if instance.is_suspended:
+                    raise UserError("Unsuspend this VPS before reinstalling it.")
                 target_os = instance.os if os_key is None else os_key
                 os_choice(target_os)
                 await asyncio.to_thread(self.store.update, instance_id, status="reinstalling")
@@ -228,10 +244,19 @@ class Manager:
                 except Exception:
                     await asyncio.to_thread(self.store.update, instance_id, status="error")
                     raise
+            if instance.is_suspended and action in {"start", "restart"}:
+                raise UserError("This VPS is suspended — run `!unsuspend` first.")
             if action == "start":
                 await asyncio.to_thread(self.backend.start, instance_id)
             elif action == "stop":
                 await asyncio.to_thread(self.backend.stop, instance_id)
+            elif action == "restart":
+                restart_fn = getattr(self.backend, "restart", None)
+                if restart_fn is not None:
+                    await asyncio.to_thread(restart_fn, instance_id)
+                else:
+                    await asyncio.to_thread(self.backend.stop, instance_id)
+                    await asyncio.to_thread(self.backend.start, instance_id)
             else:
                 raise ValueError("Unknown operation")
             status = await asyncio.to_thread(self.backend.status, instance_id)
@@ -243,6 +268,9 @@ class Manager:
     async def stop(self, actor: Actor, instance_id: str) -> Instance:
         return await self._operation(actor, instance_id, "stop")
 
+    async def restart(self, actor: Actor, instance_id: str) -> Instance:
+        return await self._operation(actor, instance_id, "restart")
+
     async def reinstall(
         self, actor: Actor, instance_id: str, os_key: str | None = None
     ) -> Instance:
@@ -251,9 +279,189 @@ class Manager:
     async def delete(self, actor: Actor, instance_id: str) -> Instance:
         return await self._operation(actor, instance_id, "delete")
 
+    async def suspend(self, actor: Actor, instance_id: str, reason: str | None = None) -> Instance:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can suspend a VPS.")
+        async with self._locks[instance_id]:
+            await self.get(actor, instance_id)
+            await asyncio.to_thread(self.backend.stop, instance_id)
+            clean_reason = (reason or "").strip()[:160] or None
+            return await asyncio.to_thread(
+                self.store.update,
+                instance_id,
+                status="suspended",
+                suspended_reason=clean_reason,
+            )
+
+    async def unsuspend(self, actor: Actor, instance_id: str) -> Instance:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can unsuspend a VPS.")
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            await asyncio.to_thread(self.backend.start, instance.id)
+            status = await asyncio.to_thread(self.backend.status, instance.id)
+            return await asyncio.to_thread(
+                self.store.update,
+                instance.id,
+                status=status,
+                suspended_reason=None,
+            )
+
+    async def resize(self, actor: Actor, instance_id: str, specs: Specs) -> Instance:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can resize a VPS.")
+        specs.validate(self.settings.max_ram_gb, self.settings.max_cpu, self.settings.max_disk_gb)
+        async with self._capacity_lock, self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if specs.disk_gb < instance.disk_gb:
+                raise UserError(
+                    f"Disk cannot shrink below {instance.disk_gb}GB without reinstalling."
+                )
+            _, total_ram, total_cpu = await asyncio.to_thread(self.store.totals)
+            new_ram_total = total_ram - instance.ram_gb + specs.ram_gb
+            new_cpu_total = total_cpu - instance.cpu + specs.cpu
+            if new_ram_total > self.settings.host_ram_mb // 1024:
+                raise UserError("Not enough unreserved host RAM for that plan.")
+            if new_cpu_total > self.settings.host_cpu:
+                raise UserError("Not enough unreserved host CPU capacity for that plan.")
+            disk_delta_gb = specs.disk_gb - instance.disk_gb
+            if disk_delta_gb > 0:
+                free = await asyncio.to_thread(
+                    lambda: shutil.disk_usage(self.settings.data_dir).free
+                )
+                if free < disk_delta_gb * 1024**3 + 1024**3:
+                    raise UserError("Not enough free host disk space to expand this VPS.")
+                resize_fn = getattr(self.backend, "resize_disk", None)
+                if resize_fn is not None:
+                    await asyncio.to_thread(resize_fn, instance_id, specs.disk_gb)
+            was_running = instance.status == "running"
+            was_suspended = instance.is_suspended
+            container_id = await asyncio.to_thread(
+                self.backend.recreate_container,
+                instance_id,
+                specs,
+                instance.owner_id,
+                instance.guild_id,
+                was_running and not was_suspended,
+                instance.os,
+            )
+            new_status = "suspended" if was_suspended else ("running" if was_running else "stopped")
+            return await asyncio.to_thread(
+                self.store.update,
+                instance_id,
+                ram_gb=specs.ram_gb,
+                cpu=specs.cpu,
+                disk_gb=specs.disk_gb,
+                container_id=container_id,
+                status=new_status,
+            )
+
+    async def renew(self, actor: Actor, instance_id: str, duration_seconds: int | None) -> Instance:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can change VPS expiry.")
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            new_expiry = (
+                None
+                if duration_seconds is None
+                else future_iso(duration_seconds, base_iso=instance.expires_at)
+            )
+            fields: dict[str, str | int | None] = {"expires_at": new_expiry}
+            if (
+                instance.is_suspended
+                and instance.suspended_reason == "Expired"
+                and (new_expiry is None or duration_seconds is not None)
+            ):
+                await asyncio.to_thread(self.backend.start, instance_id)
+                fields["status"] = await asyncio.to_thread(self.backend.status, instance_id)
+                fields["suspended_reason"] = None
+            return await asyncio.to_thread(self.store.update, instance_id, **fields)
+
+    async def transfer(self, actor: Actor, instance_id: str, new_owner_id: int) -> Instance:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can transfer a VPS.")
+        async with self._capacity_lock, self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.owner_id == new_owner_id:
+                return instance
+            existing = await asyncio.to_thread(self.store.list, actor.guild_id, new_owner_id)
+            if len(existing) >= self.settings.max_per_user:
+                raise UserError(
+                    f"<@{new_owner_id}> already has the maximum of "
+                    f"{self.settings.max_per_user} VPSes."
+                )
+            return await asyncio.to_thread(self.store.update, instance_id, owner_id=new_owner_id)
+
+    async def backup(self, actor: Actor, instance_id: str) -> Instance:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended and not actor.is_admin:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            fn = getattr(self.backend, "backup_home", None)
+            if fn is None:
+                raise BackendError("Backup is not supported by this backend.")
+            await asyncio.to_thread(fn, instance_id)
+            return await asyncio.to_thread(self.store.update, instance_id, backup_at=utc_now())
+
+    async def restore(self, actor: Actor, instance_id: str) -> Instance:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended and not actor.is_admin:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            if not instance.backup_at:
+                raise UserError("No backup snapshot exists yet. Click **Backup** first.")
+            fn = getattr(self.backend, "restore_home", None)
+            if fn is None:
+                raise BackendError("Restore is not supported by this backend.")
+            was_running = instance.status == "running"
+            if was_running:
+                await asyncio.to_thread(self.backend.stop, instance_id)
+            await asyncio.to_thread(fn, instance_id)
+            if was_running:
+                await asyncio.to_thread(self.backend.start, instance_id)
+            status = (
+                "suspended"
+                if instance.is_suspended
+                else await asyncio.to_thread(self.backend.status, instance_id)
+            )
+            return await asyncio.to_thread(self.store.update, instance_id, status=status)
+
+    async def sweep_expired(self) -> list[Instance]:
+        """Auto-suspend any non-suspended VPS whose expires_at timestamp has passed."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        instances = await asyncio.to_thread(self.store.list)
+        expired: list[Instance] = []
+        for instance in instances:
+            if not instance.expires_at or instance.status in {"suspended", "deleting"}:
+                continue
+            try:
+                exp = datetime.fromisoformat(instance.expires_at)
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            if exp <= now:
+                async with self._locks[instance.id]:
+                    try:
+                        await asyncio.to_thread(self.backend.stop, instance.id)
+                    except Exception:
+                        log.warning("Could not stop expired VPS %s", instance.id, exc_info=True)
+                    updated = await asyncio.to_thread(
+                        self.store.update,
+                        instance.id,
+                        status="suspended",
+                        suspended_reason="Expired",
+                    )
+                    expired.append(updated)
+        return expired
+
     async def sshx(self, actor: Actor, instance_id: str) -> tuple[Instance, str]:
         async with self._locks[instance_id]:
             instance = await self.get(actor, instance_id)
+            if instance.is_suspended:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
             url = await asyncio.to_thread(self.backend.sshx, instance_id)
             return instance, url
 
@@ -265,7 +473,7 @@ class Manager:
     async def refresh(self, actor: Actor, instance_id: str) -> Instance:
         async with self._locks[instance_id]:
             instance = await self.get(actor, instance_id)
-            if instance.status in {"provisioning", "reinstalling", "deleting"}:
+            if instance.status in {"provisioning", "reinstalling", "deleting", "suspended"}:
                 return instance
             status = await asyncio.to_thread(self.backend.status, instance_id)
             return await asyncio.to_thread(self.store.update, instance_id, status=status)
@@ -304,7 +512,8 @@ class Manager:
             if instance.status == "deleting":
                 continue
             async with self._locks[instance.id]:
-                running = instance.status != "stopped"
+                was_suspended = instance.is_suspended
+                running = instance.status not in {"stopped", "suspended"}
                 try:
                     container_id = await asyncio.to_thread(
                         self.backend.recreate_container,
@@ -315,11 +524,14 @@ class Manager:
                         running,
                         instance.os,
                     )
+                    new_state = (
+                        "suspended" if was_suspended else ("running" if running else "stopped")
+                    )
                     await asyncio.to_thread(
                         self.store.update,
                         instance.id,
                         container_id=container_id,
-                        status="running" if running else "stopped",
+                        status=new_state,
                     )
                     results.append((instance.id, True))
                 except Exception:
@@ -335,6 +547,14 @@ class Manager:
         for instance in instances:
             if instance.status in {"provisioning", "reinstalling", "deleting"}:
                 await asyncio.to_thread(self.store.update, instance.id, status="error")
+            elif instance.is_suspended:
+                if states.get(instance.id) == "running":
+                    try:
+                        await asyncio.to_thread(self.backend.stop, instance.id)
+                    except Exception:
+                        log.warning(
+                            "Could not stop suspended container %s", instance.id, exc_info=True
+                        )
             else:
                 await asyncio.to_thread(
                     self.store.update, instance.id, status=states.get(instance.id, "error")
@@ -419,6 +639,7 @@ def _collect_host_status(
     used_bytes = int(getattr(usage, "used", max(0, total_bytes - free_bytes)) or 0)
     running_vps = sum(1 for i in instances if i.status == "running")
     stopped_vps = sum(1 for i in instances if i.status == "stopped")
+    suspended_vps = sum(1 for i in instances if i.status == "suspended")
     return HostStatus(
         hostname=hostname,
         uptime_seconds=uptime_seconds,
@@ -437,4 +658,5 @@ def _collect_host_status(
         reserved_ram_gb=sum(i.ram_gb for i in instances),
         reserved_cpu=sum(i.cpu for i in instances),
         reserved_disk_gb=sum(i.disk_gb for i in instances),
+        suspended_vps=suspended_vps,
     )

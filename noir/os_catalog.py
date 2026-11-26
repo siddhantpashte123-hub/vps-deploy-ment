@@ -15,6 +15,7 @@ class OSChoice:
 
 OS_CHOICES: tuple[OSChoice, ...] = (
     OSChoice("ubuntu-24.04", "Ubuntu 24.04 LTS", "ubuntu:24.04", "🟠"),
+    OSChoice("ubuntu-22.04", "Ubuntu 22.04 LTS", "ubuntu:22.04", "🟡"),
     OSChoice("debian-12", "Debian 12 (bookworm)", "debian:12", "🌀"),
 )
 DEFAULT_OS = "ubuntu-24.04"

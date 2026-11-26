@@ -24,6 +24,7 @@ import tempfile
 STATE_ROOT = "/var/lib/noir"
 DISKS = STATE_ROOT + "/disks"
 MOUNTS = STATE_ROOT + "/mounts"
+BACKUPS = STATE_ROOT + "/backups"
 # Legacy fier- IDs from pre-NOIR installs remain valid for existing disks.
 ID_RE = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
 MAX_GB = 256
@@ -263,6 +264,89 @@ def delete(instance_id: str) -> None:
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
             fail("Refusing to delete an unsafe disk image.")
         os.unlink(image)
+    archive = BACKUPS + "/" + instance_id + ".tar.gz"
+    if os.path.lexists(archive):
+        st = os.lstat(archive)
+        if stat.S_ISREG(st.st_mode) and st.st_uid == 0:
+            os.unlink(archive)
+    print("ok")
+
+
+def resize(instance_id: str, size_raw: str) -> None:
+    if not re.fullmatch(r"[0-9]{1,3}", size_raw):
+        fail("Invalid disk size.")
+    size = int(size_raw)
+    if not 1 <= size <= MAX_GB:
+        fail("Disk size outside helper limits.")
+    image, mount = paths(instance_id)
+    if os.path.isfile(image) and not os.path.islink(image) and os.stat(image).st_uid == 0:
+        current_gb = max(1, round(os.stat(image).st_size / (1024**3)))
+        if size < current_gb:
+            fail("Shrinking an ext4 disk image in-place is not supported.")
+        if size > current_gb:
+            delta = (size - current_gb) * 1024**3
+            if shutil.disk_usage(STATE_ROOT).free < delta + RESERVE_BYTES:
+                fail("Insufficient free host disk space to grow disk.")
+            was_mounted = mounted(mount)
+            if was_mounted:
+                run_mount("umount", mount)
+            try:
+                run("fallocate", "-l", f"{size}G", image)
+                run("e2fsck", "-f", "-p", image)
+                run("resize2fs", image)
+            finally:
+                if was_mounted:
+                    ensure_loop_devices()
+                    run_mount("mount", "-o", "loop,nosuid,nodev", image, mount)
+        else:
+            mount_existing(instance_id)
+            return
+    elif os.path.isdir(mount) and not os.path.islink(mount):
+        if shutil.disk_usage(STATE_ROOT).free < RESERVE_BYTES:
+            fail("Insufficient free host disk space.")
+    else:
+        fail("Disk image/home missing or unsafe.")
+    print(mount)
+
+
+def backup(instance_id: str) -> None:
+    _, mount = paths(instance_id)
+    if not os.path.isdir(mount) or os.path.islink(mount):
+        fail("Home directory missing or unsafe.")
+    safe_dir(BACKUPS, create=True)
+    if shutil.disk_usage(STATE_ROOT).free < RESERVE_BYTES:
+        fail("Insufficient free host disk space for backup.")
+    archive = BACKUPS + "/" + instance_id + ".tar.gz"
+    tmp_archive = archive + ".tmp"
+    if os.path.lexists(tmp_archive):
+        os.unlink(tmp_archive)
+    try:
+        run("tar", "--numeric-owner", "-czf", tmp_archive, "-C", mount, ".")
+        os.chmod(tmp_archive, 0o600)
+        os.replace(tmp_archive, archive)
+    finally:
+        if os.path.lexists(tmp_archive):
+            os.unlink(tmp_archive)
+    print(str(os.stat(archive).st_size))
+
+
+def restore(instance_id: str) -> None:
+    _, mount = paths(instance_id)
+    if not os.path.isdir(mount) or os.path.islink(mount):
+        fail("Home directory missing or unsafe.")
+    safe_dir(BACKUPS, create=True)
+    archive = BACKUPS + "/" + instance_id + ".tar.gz"
+    if not os.path.isfile(archive) or os.path.islink(archive) or os.stat(archive).st_uid != 0:
+        fail("No saved backup exists for this VPS yet.")
+    for entry in os.listdir(mount):
+        if entry == "lost+found":
+            continue
+        target = mount + "/" + entry
+        if os.path.islink(target) or not os.path.isdir(target):
+            os.unlink(target)
+        else:
+            shutil.rmtree(target)
+    run("tar", "--numeric-owner", "--no-same-permissions", "-xzf", archive, "-C", mount)
     print("ok")
 
 
@@ -274,21 +358,34 @@ def main() -> None:
         return
     if os.geteuid() != 0:
         fail("Helper must run as root.")
-    if len(args) not in (2, 3) or args[0] not in {"create", "mount", "delete", "info", "probe"}:
-        fail("Usage: noir-volume create ID GB | mount ID | delete ID | info ID | probe ID | check ID")
+    valid_cmds = {"create", "mount", "delete", "resize", "backup", "restore", "info", "probe"}
+    if len(args) not in (2, 3) or args[0] not in valid_cmds:
+        fail(
+            "Usage: noir-volume create|resize ID GB | "
+            "mount|delete|backup|restore|info|probe|check ID"
+        )
     try:
         if args[0] == "create":
             if len(args) != 3:
                 fail("create requires a disk size.")
             create(args[1], args[2])
+        elif args[0] == "resize":
+            if len(args) != 3:
+                fail("resize requires a disk size.")
+            resize(args[1], args[2])
         elif args[0] == "mount":
             mount_existing(args[1])
         elif args[0] == "delete":
             delete(args[1])
+        elif args[0] == "backup":
+            backup(args[1])
+        elif args[0] == "restore":
+            restore(args[1])
         elif args[0] == "probe":
             print("loop" if probe_loop() else "directory")
         else:
             image, mount = paths(args[1])
+            archive = BACKUPS + "/" + args[1] + ".tar.gz"
             print(
                 json.dumps(
                     {
@@ -296,6 +393,7 @@ def main() -> None:
                         "mount": mount,
                         "mounted": mounted(mount),
                         "mode": "loop" if os.path.isfile(image) else "directory",
+                        "has_backup": os.path.isfile(archive),
                     }
                 )
             )

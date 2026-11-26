@@ -5,11 +5,12 @@ import threading
 from pathlib import Path
 
 from .errors import NotFound
-from .models import Instance, utc_now, valid_id
+from .models import STATUSES, Instance, utc_now, valid_id
 from .os_catalog import valid_os
 
 COLUMNS = (
-    "id, guild_id, owner_id, ram_gb, cpu, disk_gb, container_id, status, created_at, updated_at, os"
+    "id, guild_id, owner_id, ram_gb, cpu, disk_gb, container_id, status, "
+    "created_at, updated_at, os, expires_at, suspended_reason, backup_at"
 )
 
 
@@ -36,7 +37,10 @@ class Store:
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    os TEXT NOT NULL DEFAULT 'ubuntu-24.04'
+                    os TEXT NOT NULL DEFAULT 'ubuntu-24.04',
+                    expires_at TEXT,
+                    suspended_reason TEXT,
+                    backup_at TEXT
                 )"""
             )
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(instances)")}
@@ -44,6 +48,12 @@ class Store:
                 self._db.execute(
                     "ALTER TABLE instances ADD COLUMN os TEXT NOT NULL DEFAULT 'ubuntu-24.04'"
                 )
+            if "expires_at" not in columns:
+                self._db.execute("ALTER TABLE instances ADD COLUMN expires_at TEXT")
+            if "suspended_reason" not in columns:
+                self._db.execute("ALTER TABLE instances ADD COLUMN suspended_reason TEXT")
+            if "backup_at" not in columns:
+                self._db.execute("ALTER TABLE instances ADD COLUMN backup_at TEXT")
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS instances_owner ON instances(guild_id, owner_id)"
             )
@@ -57,9 +67,12 @@ class Store:
             raise ValueError("Invalid internal instance ID")
         if not valid_os(instance.os):
             raise ValueError("Invalid OS")
+        if instance.status not in STATUSES:
+            raise ValueError("Invalid status")
         with self._lock, self._db:
             self._db.execute(
-                f"INSERT INTO instances ({COLUMNS}) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO instances ({COLUMNS}) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     instance.id,
                     str(instance.guild_id),
@@ -72,6 +85,9 @@ class Store:
                     instance.created_at,
                     instance.updated_at,
                     instance.os,
+                    instance.expires_at,
+                    instance.suspended_reason,
+                    instance.backup_at,
                 ),
             )
         return instance
@@ -101,25 +117,32 @@ class Store:
         return [Instance.from_row(row) for row in rows]
 
     def update(self, instance_id: str, **fields: str | int | None) -> Instance:
-        allowed = {"status", "container_id", "os"}
+        allowed = {
+            "status",
+            "container_id",
+            "os",
+            "owner_id",
+            "ram_gb",
+            "cpu",
+            "disk_gb",
+            "expires_at",
+            "suspended_reason",
+            "backup_at",
+        }
         if not fields or not set(fields) <= allowed:
             raise ValueError("Unsupported inventory update")
-        if "os" in fields and not valid_os(fields["os"]):
+        if "os" in fields and not valid_os(fields["os"]):  # type: ignore[arg-type]
             raise ValueError("Invalid OS")
-        if "status" in fields and fields["status"] not in {
-            "provisioning",
-            "running",
-            "stopped",
-            "reinstalling",
-            "deleting",
-            "error",
-        }:
+        if "status" in fields and fields["status"] not in STATUSES:
             raise ValueError("Invalid status")
-        assignments = ", ".join(f"{key} = ?" for key in fields)
+        payload = dict(fields)
+        if "owner_id" in payload and payload["owner_id"] is not None:
+            payload["owner_id"] = str(payload["owner_id"])
+        assignments = ", ".join(f"{key} = ?" for key in payload)
         with self._lock, self._db:
             cursor = self._db.execute(
                 f"UPDATE instances SET {assignments}, updated_at = ? WHERE id = ?",
-                (*fields.values(), utc_now(), instance_id),
+                (*payload.values(), utc_now(), instance_id),
             )
             if cursor.rowcount != 1:
                 raise NotFound("That VPS no longer exists.")

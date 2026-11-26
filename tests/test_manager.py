@@ -237,3 +237,88 @@ async def test_failed_os_switch_keeps_recorded_os_and_marks_error(manager, actor
     retained = store.get(instance.id)
     assert retained.status == "error"
     assert retained.os == "debian-12"
+
+
+async def test_suspend_blocks_member_actions_and_unsuspend_restores(
+    manager, actor, member_actor, backend, store
+):
+    inst = await manager.deploy(actor, Specs(1, 1, 1), owner_id=member_actor.user_id)
+    with pytest.raises(AccessDenied):
+        await manager.suspend(member_actor, inst.id, "nope")
+    suspended = await manager.suspend(actor, inst.id, "TOS check")
+    assert suspended.is_suspended is True
+    assert suspended.suspended_reason == "TOS check"
+    assert backend.items[inst.id]["status"] == "stopped"
+
+    # Member cannot start, restart, open console, or backup while suspended
+    for call in (
+        lambda: manager.start(member_actor, inst.id),
+        lambda: manager.restart(member_actor, inst.id),
+        lambda: manager.sshx(member_actor, inst.id),
+        lambda: manager.backup(member_actor, inst.id),
+    ):
+        with pytest.raises(UserError, match="suspended"):
+            await call()
+
+    # Refresh and runtime upgrade preserve suspended state
+    refreshed = await manager.refresh(member_actor, inst.id)
+    assert refreshed.is_suspended is True
+    await manager.upgrade_runtime()
+    assert store.get(inst.id).is_suspended is True
+
+    restored = await manager.unsuspend(actor, inst.id)
+    assert restored.status == "running"
+    assert restored.suspended_reason is None
+
+
+async def test_resize_updates_plan_without_wiping_home_and_blocks_disk_shrink(
+    manager, actor, member_actor, backend
+):
+    inst = await manager.deploy(actor, Specs(1, 1, 4), owner_id=member_actor.user_id)
+    with pytest.raises(AccessDenied):
+        await manager.resize(member_actor, inst.id, Specs(2, 2, 6))
+    with pytest.raises(UserError, match="shrink"):
+        await manager.resize(actor, inst.id, Specs(2, 2, 2))
+    resized = await manager.resize(actor, inst.id, Specs(2, 2, 8))
+    assert (resized.ram_gb, resized.cpu, resized.disk_gb) == (2, 2, 8)
+    assert resized.status == "running"
+    assert f"resize-disk:{inst.id}:8" in backend.events
+    assert f"wipe:{inst.id}" not in backend.events
+
+
+async def test_restart_backup_restore_and_transfer(manager, actor, member_actor, backend):
+    inst = await manager.deploy(actor, Specs(1, 1, 2), owner_id=member_actor.user_id)
+    restarted = await manager.restart(member_actor, inst.id)
+    assert restarted.status == "running"
+    assert f"restart:{inst.id}" in backend.events
+
+    with pytest.raises(UserError, match="No backup snapshot"):
+        await manager.restore(member_actor, inst.id)
+
+    backed = await manager.backup(member_actor, inst.id)
+    assert backed.backup_at is not None
+    restored = await manager.restore(member_actor, inst.id)
+    assert restored.status == "running"
+    assert f"backup:{inst.id}" in backend.events
+    assert f"restore:{inst.id}" in backend.events
+
+    moved = await manager.transfer(actor, inst.id, 777)
+    assert moved.owner_id == 777
+
+
+async def test_expiry_sweep_and_renew_auto_unsuspends(manager, actor, store):
+    past = "2020-01-01T00:00:00+00:00"
+    inst = await manager.deploy(actor, Specs(1, 1, 1), expires_at=past)
+    expired = await manager.sweep_expired()
+    assert [i.id for i in expired] == [inst.id]
+    locked = store.get(inst.id)
+    assert locked.status == "suspended"
+    assert locked.suspended_reason == "Expired"
+
+    renewed = await manager.renew(actor, inst.id, 86400 * 30)
+    assert renewed.status == "running"
+    assert renewed.suspended_reason is None
+    assert renewed.expires_at is not None
+
+    cleared = await manager.renew(actor, inst.id, None)
+    assert cleared.expires_at is None

@@ -56,6 +56,7 @@ class Settings:
     max_total: int
     host_ram_mb: int
     host_cpu: int
+    log_channel_id: int | None = None
 
     def image_for(self, os_key: str) -> str:
         os_choice(os_key)
@@ -84,6 +85,7 @@ class Settings:
                 admin_ids.add(int(part))
         legacy_image = os.getenv("NOIR_IMAGE", "").strip()
         ubuntu_image = os.getenv("NOIR_IMAGE_UBUNTU", legacy_image or "noir-vps:local").strip()
+        ubuntu22_image = os.getenv("NOIR_IMAGE_UBUNTU_22", "noir-vps:ubuntu-22.04").strip()
         debian_image = os.getenv("NOIR_IMAGE_DEBIAN", "noir-vps:debian-12").strip()
         settings = cls(
             token=token,
@@ -91,7 +93,13 @@ class Settings:
             allowed_guild_id=_optional_id("NOIR_ALLOWED_GUILD_ID"),
             admin_ids=frozenset(admin_ids),
             data_dir=Path(os.getenv("NOIR_DATA_DIR", "/var/lib/noir/data")).resolve(),
-            images=MappingProxyType({DEFAULT_OS: ubuntu_image, "debian-12": debian_image}),
+            images=MappingProxyType(
+                {
+                    DEFAULT_OS: ubuntu_image,
+                    "ubuntu-22.04": ubuntu22_image,
+                    "debian-12": debian_image,
+                }
+            ),
             network=os.getenv("NOIR_NETWORK", "noir-vps").strip(),
             volume_helper=Path(os.getenv("NOIR_VOLUME_HELPER", "/usr/local/libexec/noir-volume")),
             max_ram_gb=_int("NOIR_MAX_RAM_GB", 4, 1, 128),
@@ -102,6 +110,7 @@ class Settings:
             host_ram_mb=_int("NOIR_HOST_RAM_MB", 0, 0, 1024 * 1024)
             or max(512, int(_physical_ram_mb() * 0.75)),
             host_cpu=_int("NOIR_HOST_CPU", 0, 0, 1024) or (os.cpu_count() or 1),
+            log_channel_id=_optional_id("NOIR_LOG_CHANNEL_ID"),
         )
         if not settings.network:
             raise UserError("NOIR_NETWORK cannot be empty.")
