@@ -15,11 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_os_catalog_and_labels():
     assert DEFAULT_OS == "ubuntu-24.04"
-    assert {choice.id for choice in OS_CHOICES} == {"ubuntu-24.04", "debian-12"}
+    assert {choice.id for choice in OS_CHOICES} == {"ubuntu-24.04", "ubuntu-22.04", "debian-12"}
     assert os_label("ubuntu-24.04") == "Ubuntu 24.04 LTS"
+    assert os_label("ubuntu-22.04") == "Ubuntu 22.04 LTS"
     assert os_label("debian-12") == "Debian 12 (bookworm)"
     assert os_choice("debian-12").base_image == "debian:12"
-    with pytest.raises(UserError, match="ubuntu-24.04, debian-12"):
+    assert os_choice("ubuntu-22.04").base_image == "ubuntu:22.04"
+    with pytest.raises(UserError, match="ubuntu-24.04, ubuntu-22.04, debian-12"):
         os_choice("windows-11")
 
 
@@ -27,21 +29,28 @@ def test_per_os_images_and_legacy_fallback(monkeypatch):
     monkeypatch.setenv("DISCORD_TOKEN", "x" * 60)
     monkeypatch.setenv("NOIR_IMAGE", "legacy:ubuntu")
     monkeypatch.delenv("NOIR_IMAGE_UBUNTU", raising=False)
+    monkeypatch.delenv("NOIR_IMAGE_UBUNTU_22", raising=False)
     monkeypatch.delenv("NOIR_IMAGE_DEBIAN", raising=False)
     settings = Settings.load()
     assert settings.image_for("ubuntu-24.04") == "legacy:ubuntu"
+    assert settings.image_for("ubuntu-22.04") == "noir-vps:ubuntu-22.04"
     assert settings.image_for("debian-12") == "noir-vps:debian-12"
     monkeypatch.setenv("NOIR_IMAGE_UBUNTU", "custom:ubuntu")
+    monkeypatch.setenv("NOIR_IMAGE_UBUNTU_22", "custom:ubuntu22")
     monkeypatch.setenv("NOIR_IMAGE_DEBIAN", "custom:debian")
     settings = Settings.load()
-    assert settings.images == {"ubuntu-24.04": "custom:ubuntu", "debian-12": "custom:debian"}
+    assert settings.images == {
+        "ubuntu-24.04": "custom:ubuntu",
+        "ubuntu-22.04": "custom:ubuntu22",
+        "debian-12": "custom:debian",
+    }
     with pytest.raises(UserError):
         settings.image_for("fedora-99")
     with pytest.raises(TypeError):
         settings.images["debian-12"] = "mutated"
 
 
-@pytest.mark.parametrize("name", ["NOIR_IMAGE_UBUNTU", "NOIR_IMAGE_DEBIAN"])
+@pytest.mark.parametrize("name", ["NOIR_IMAGE_UBUNTU", "NOIR_IMAGE_UBUNTU_22", "NOIR_IMAGE_DEBIAN"])
 def test_invalid_per_os_image_rejected(monkeypatch, name):
     monkeypatch.setenv("DISCORD_TOKEN", "x" * 60)
     monkeypatch.setenv(name, "bad image")
@@ -69,26 +78,30 @@ def test_preflight_requires_every_os_image(settings):
     client.info.return_value = {}
     client.images.get.side_effect = lambda image: (
         Mock()
-        if image == settings.image_for("ubuntu-24.04")
+        if image != settings.image_for("debian-12")
         else (_ for _ in ()).throw(ImageNotFound(image))
     )
     backend = DockerBackend(settings, client)
     with pytest.raises(BackendError, match="Debian 12.*missing"):
         backend.preflight()
-    assert client.images.get.call_count == 2
+    assert client.images.get.call_count == 3
 
 
-def test_runtime_dockerfiles_and_installer_build_both_contexts():
+def test_runtime_dockerfiles_and_installer_build_all_contexts():
     installer = (ROOT / "install.sh").read_text()
+    dirs_and_tags = {
+        "ubuntu-24.04": ("ubuntu", "noir-vps:local"),
+        "ubuntu-22.04": ("ubuntu22", "noir-vps:ubuntu-22.04"),
+        "debian-12": ("debian", "noir-vps:debian-12"),
+    }
     for choice in OS_CHOICES:
-        directory = "ubuntu" if choice.id == "ubuntu-24.04" else "debian"
+        directory, tag = dirs_and_tags[choice.id]
         dockerfile = ROOT / "runtime" / directory / "Dockerfile"
         text = dockerfile.read_text()
         assert text.splitlines()[0] == f"FROM {choice.base_image}"
         assert "COPY sshx /usr/local/bin/sshx" in text
         assert "COPY noir-sshx /usr/local/bin/noir-sshx" in text
         assert "USER 0:0" in text
-        tag = "noir-vps:local" if directory == "ubuntu" else "noir-vps:debian-12"
         assert (
             f"docker build --pull -t {tag} -f runtime/{directory}/Dockerfile runtime" in installer
         )

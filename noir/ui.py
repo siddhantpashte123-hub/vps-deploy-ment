@@ -22,6 +22,7 @@ MUTED = 0x64748B
 STATUS_TEXT = {
     "running": "Running · Online",
     "stopped": "Stopped · Offline",
+    "suspended": "Suspended · Locked",
     "error": "Error · Needs Attention",
     "provisioning": "Provisioning · Booting",
     "reinstalling": "Reinstalling · Wiping Disk",
@@ -30,6 +31,7 @@ STATUS_TEXT = {
 STATUS_COLOR = {
     "running": SUCCESS,
     "stopped": WARNING,
+    "suspended": DANGER,
     "error": DANGER,
     "provisioning": ACCENT,
     "reinstalling": WARNING,
@@ -100,6 +102,13 @@ def _vmid_short(instance_id: str) -> str:
     return tail[:6].upper()
 
 
+def _discord_time(iso_value: str | None, style: str = "R") -> str:
+    if not iso_value:
+        return "Never"
+    ts = int(_timestamp(iso_value))
+    return f"<t:{ts}:{style}>" if ts > 0 else iso_value
+
+
 def instance_embed(
     instance: Instance,
     stats: LiveStats | None = None,
@@ -108,6 +117,8 @@ def instance_embed(
 ) -> discord.Embed:
     color = STATUS_COLOR.get(instance.status, COLOR)
     status_line = STATUS_TEXT.get(instance.status, instance.status.capitalize())
+    if instance.is_suspended and instance.suspended_reason:
+        status_line = f"{status_line} ({instance.suspended_reason})"
     online = instance.status == "running" and (stats.online if stats is not None else True)
 
     ram_total_mb = instance.ram_gb * 1024
@@ -135,15 +146,26 @@ def instance_embed(
         disk_pct = 0.0
 
     cores_word = "Core" if instance.cpu == 1 else "Cores"
-    access_line = (
-        "**Root terminal** — click **Console** to open a private SSHX root shell"
-        if instance.status == "running"
-        else (
-            "**Stopped** — click **Start** to boot this VPS (files are preserved)"
-            if instance.status == "stopped"
-            else "**Attention** — click **Refresh** or **Reinstall** to recover this VPS"
+    if instance.is_suspended:
+        reason_part = f" ({instance.suspended_reason})" if instance.suspended_reason else ""
+        access_line = (
+            f"**Suspended**{reason_part} — files in `/home/noir` are safe; "
+            f"contact an admin to unsuspend"
         )
-    )
+    elif instance.status == "running":
+        access_line = "**Root terminal** — click **Console** to open a private SSHX root shell"
+    elif instance.status == "stopped":
+        access_line = "**Stopped** — click **Start** to boot this VPS (files are preserved)"
+    else:
+        access_line = "**Attention** — click **Refresh** or **Reinstall** to recover this VPS"
+
+    meta_parts = [f"**Uptime** {uptime_text}"]
+    if instance.expires_at:
+        meta_parts.append(f"**Expires** {_discord_time(instance.expires_at, 'R')}")
+    if instance.backup_at:
+        meta_parts.append(f"**Backup** {_discord_time(instance.backup_at, 'R')}")
+    meta_line = " • ".join(meta_parts)
+
     description = (
         f"`{instance.id}-{instance.owner_id}`\n"
         f"> **Status** {status_line}\n\n"
@@ -151,7 +173,7 @@ def instance_embed(
         f"**Storage** {instance.disk_gb}GB\n"
         f"> **OS** {instance.os} • **Config** {instance.ram_gb}GB RAM / "
         f"{instance.cpu} CPU / {instance.disk_gb}GB Disk\n"
-        f"> **Uptime** {uptime_text}\n\n"
+        f"> {meta_line}\n\n"
         f"> **CPU** {cpu_pct:.1f}% • **RAM** {ram_used_mb}MB / {ram_total_mb}MB "
         f"({ram_pct:.1f}%) • **Disk** {disk_used_gb:.1f}GB / {disk_total_gb:.1f}GB "
         f"({disk_pct:.1f}%)\n"
@@ -172,8 +194,8 @@ def empty_embed() -> discord.Embed:
         description=(
             "`noir-empty`\n"
             "> **Status** Idle · No VPS Assigned\n\n"
-            "> **Deploy** `!deploy 1 1 1 @user` *(Admin Only)*\n"
-            "> **Images** `ubuntu-24.04` • `debian-12`\n"
+            "> **Deploy** `!deploy 1 1 1 @user [30d]` *(Admin Only)*\n"
+            "> **Images** `ubuntu-24.04` • `ubuntu-22.04` • `debian-12`\n"
             "> **Control** Server Channel or Bot DMs (`!manage`)\n\n"
             "> Ask a server administrator to provision a root VPS for you."
         ),
@@ -190,7 +212,7 @@ def panel_hub_embed(guild_name: str, count: int) -> discord.Embed:
             f"`noir-fleet-{count}`\n"
             f"> **Status** Online · Ready\n\n"
             f"> **Active Fleet** {count} Provisioned VPS Instance{plural}\n"
-            f"> **OS Images** Ubuntu 24.04 LTS • Debian 12\n"
+            f"> **OS Images** Ubuntu 24.04 LTS • Ubuntu 22.04 LTS • Debian 12\n"
             f"> **Direct Messages** `!manage` • `!help` anytime in Bot DMs\n\n"
             f"> Click **My VPS** to open your console here or "
             f"**Control in DM** to manage privately."
@@ -206,9 +228,16 @@ def help_embed(settings) -> discord.Embed:
         description=(
             "`noir-cli-guide`\n"
             "> **Status** Online · Server & DM Control Enabled\n\n"
-            "> **Owner / DM** `!manage [id]` • `!panel` • `!delete <id>` • `!delete 1 1 1`\n"
-            "> **Admin Deploy** `!deploy RAM CPU DISK [@user]` *(Ubuntu 24.04 / Debian 12)*\n"
-            "> **Admin Tools** `!status` *(Host Node Dashboard)* • `!delete @user`\n\n"
+            "> **Owner / DM** `!manage [id]` • `!panel` • `!backup <id>` • "
+            "`!restore <id>` • `!delete <id>`\n"
+            "> **Admin Deploy** `!deploy RAM CPU DISK [@user] [30d]` "
+            "*(Ubuntu 24.04 / 22.04 / Debian 12)*\n"
+            "> **Admin Fleet** `!status` • `!list [@user]` • "
+            "`!suspend <id> [reason]` • `!unsuspend <id>`\n"
+            "> **Admin Plans** `!resize <id> RAM CPU DISK` • `!renew <id> <30d|never>` • "
+            "`!transfer <id> @user` • `!delete @user`\n"
+            "> **Slash Commands** `/manage` • `/panel` • `/status` • "
+            "`/list` • `/deploy` • `/suspend`\n\n"
             f"> **Per-User Limit** {settings.max_per_user} VPS • **Max Plan** "
             f"{settings.max_ram_gb}GB RAM / {settings.max_cpu} CPU / "
             f"{settings.max_disk_gb}GB Disk\n"
@@ -238,6 +267,7 @@ def host_status_embed(host: HostStatus) -> discord.Embed:
     cores_word = "Core" if host.cpu_cores == 1 else "Cores"
     uptime_text = _format_uptime(host.uptime_seconds, True)
     color = DANGER if (ram_pct >= 90.0 or disk_pct >= 90.0) else SUCCESS
+    susp_part = f" • {host.suspended_vps} Suspended" if host.suspended_vps else ""
 
     embed = discord.Embed(
         title=f"Host Node — `{host.hostname}`",
@@ -246,7 +276,7 @@ def host_status_embed(host: HostStatus) -> discord.Embed:
             f"> **Status** Online · Healthy\n\n"
             f"> **CPU** {host.cpu_cores} {cores_word} • **Load** {host.load_1m:.2f} • "
             f"**Storage Mode** `{host.storage_mode}`\n"
-            f"> **Fleet** {host.running_vps} Running • {host.stopped_vps} Stopped • "
+            f"> **Fleet** {host.running_vps} Running • {host.stopped_vps} Stopped{susp_part} • "
             f"{host.total_vps} / {host.max_total_vps} Total VPS\n"
             f"> **Uptime** {uptime_text}\n\n"
             f"> **CPU** {host.cpu_percent:.1f}% • **RAM** {ram_used_gb:.1f}GB / "
@@ -258,6 +288,101 @@ def host_status_embed(host: HostStatus) -> discord.Embed:
         color=color,
     )
     return _brand(embed, "NOIR Cloud • Host Node Dashboard")
+
+
+def fleet_embed(
+    instances: list[Instance], page: int = 0, *, owner_id: int | None = None
+) -> discord.Embed:
+    page_size = 10
+    pages = max(1, (len(instances) + page_size - 1) // page_size)
+    page = max(0, min(page, pages - 1))
+    chunk = instances[page * page_size : (page + 1) * page_size]
+    scope = f"<@{owner_id}>" if owner_id is not None else "All Server Members"
+    running = sum(1 for i in instances if i.status == "running")
+    stopped = sum(1 for i in instances if i.status == "stopped")
+    suspended = sum(1 for i in instances if i.status == "suspended")
+    if not chunk:
+        body = "> *No VPS instances match this filter.*"
+    else:
+        rows = []
+        for idx, item in enumerate(chunk, start=page * page_size + 1):
+            exp = f" • Exp {_discord_time(item.expires_at, 'R')}" if item.expires_at else ""
+            rows.append(
+                f"> **#{idx}** `{item.id}` • <@{item.owner_id}> • **{item.os}** • "
+                f"{item.ram_gb}G/{item.cpu}C/{item.disk_gb}G • `{item.status.upper()}`{exp}"
+            )
+        body = "\n".join(rows)
+    embed = discord.Embed(
+        title=f"Fleet Browser — Page {page + 1}/{pages}",
+        description=(
+            f"`noir-fleet-list`\n"
+            f"> **Scope** {scope} • **Total** {len(instances)} VPS\n"
+            f"> **Summary** {running} Running • {stopped} Stopped • {suspended} Suspended\n\n"
+            f"{body}"
+        ),
+        color=COLOR if instances else MUTED,
+    )
+    return _brand(embed, f"NOIR Cloud • Fleet Browser • Page {page + 1}/{pages}")
+
+
+def audit_embed(
+    action: str,
+    *,
+    actor_id: int | None = None,
+    instance: Instance | None = None,
+    detail: str | None = None,
+    color: int = COLOR,
+) -> discord.Embed:
+    actor_line = f"<@{actor_id}> (`{actor_id}`)" if actor_id is not None else "System Auto-Task"
+    lines = [
+        f"`noir-audit-{action.lower().replace(' ', '-')}`",
+        f"> **Event** {action}",
+        f"> **Actor** {actor_line}",
+    ]
+    if instance is not None:
+        cores_word = "Core" if instance.cpu == 1 else "Cores"
+        lines.append(
+            f"> **Instance** `{instance.id}` • **Owner** <@{instance.owner_id}> • "
+            f"**Status** `{instance.status.upper()}`"
+        )
+        lines.append(
+            f"> **Spec** {instance.os} • {instance.ram_gb}GB RAM / "
+            f"{instance.cpu} {cores_word} / {instance.disk_gb}GB Disk"
+        )
+    if detail:
+        lines.append(f"> **Detail** {detail}")
+    embed = discord.Embed(
+        title=f"Audit Log — {action}",
+        description="\n".join(lines),
+        color=color,
+    )
+    return _brand(embed, "NOIR Cloud • Security & Operations Log")
+
+
+def action_card_embed(
+    title: str,
+    instance: Instance,
+    *,
+    status_line: str,
+    detail_line: str,
+    color: int = SUCCESS,
+) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    cores_word = "Core" if instance.cpu == 1 else "Cores"
+    exp_text = _discord_time(instance.expires_at, "R") if instance.expires_at else "Never"
+    embed = discord.Embed(
+        title=f"{title} — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** {status_line}\n\n"
+            f"> **Owner** <@{instance.owner_id}> • **OS** {instance.os}\n"
+            f"> **Plan** {instance.ram_gb}GB RAM / {instance.cpu} {cores_word} / "
+            f"{instance.disk_gb}GB Disk • **Expires** {exp_text}\n\n"
+            f"> {detail_line}"
+        ),
+        color=color,
+    )
+    return _brand(embed, "NOIR Cloud")
 
 
 def sshx_embed(instance: Instance, *, closed: bool = False) -> discord.Embed:
@@ -299,6 +424,14 @@ def confirm_embed(
         target_os = instance.os
         warning_line = (
             "**Permanent action** — container, `/home/noir` disk, and all files will be destroyed"
+        )
+    elif action == "restore":
+        heading = f"Restore Backup — VMID `{vmid}`"
+        target_os = instance.os
+        snap = _discord_time(instance.backup_at, "R") if instance.backup_at else "latest snapshot"
+        warning_line = (
+            f"**Overwrite `/home/noir`** — current home files will be replaced by the "
+            f"backup taken {snap}"
         )
     else:
         heading = f"Reinstall VPS — VMID `{vmid}`"
@@ -413,11 +546,16 @@ def deploy_failure_embed(
 
 
 def os_choice_embed(
-    specs: Specs, owner_id: int | None = None, *, reinstall: bool = False
+    specs: Specs,
+    owner_id: int | None = None,
+    *,
+    reinstall: bool = False,
+    expires_at: str | None = None,
 ) -> discord.Embed:
     action = "Reinstall" if reinstall else "Deploy"
     cores_word = "Core" if specs.cpu == 1 else "Cores"
     owner_line = f"> **Owner** <@{owner_id}>\n" if owner_id is not None else ""
+    expiry_line = f"> **Expires** {_discord_time(expires_at, 'R')}\n" if expires_at else ""
     images_line = " • ".join(f"**{c.label}** (`{c.id}`)" for c in OS_CHOICES)
     note_line = (
         "> **Warning** Reinstalling **permanently erases all files** in `/home/noir`."
@@ -432,7 +570,7 @@ def os_choice_embed(
             f"> **RAM** {specs.ram_gb}GB • **CPU** {specs.cpu} {cores_word} • "
             f"**Storage** {specs.disk_gb}GB\n"
             f"> **Config** {specs.ram_gb}GB RAM / {specs.cpu} CPU / {specs.disk_gb}GB Disk\n"
-            f"{owner_line}\n"
+            f"{owner_line}{expiry_line}\n"
             f"> **Images** {images_line}\n"
             f"{note_line}"
         ),
@@ -513,12 +651,20 @@ class PanelHubView(discord.ui.View):
 class DeployOSView(discord.ui.View):
     """Admin picks the OS, then the live deploy meter replaces this message."""
 
-    def __init__(self, bot, actor: Actor, specs: Specs, owner_id: int):
+    def __init__(
+        self,
+        bot,
+        actor: Actor,
+        specs: Specs,
+        owner_id: int,
+        expires_at: str | None = None,
+    ):
         super().__init__(timeout=180)
         self.bot = bot
         self.actor = actor
         self.specs = specs
         self.owner_id = owner_id
+        self.expires_at = expires_at
         self.handled = False
         self.message: discord.Message | None = None
         self.select = _os_select("Choose an OS to deploy…")
@@ -578,7 +724,12 @@ class DeployOSView(discord.ui.View):
 
         try:
             instance = await self.bot.manager.deploy(
-                self.actor, self.specs, on_progress, owner_id=self.owner_id, os_key=choice.id
+                self.actor,
+                self.specs,
+                on_progress,
+                owner_id=self.owner_id,
+                os_key=choice.id,
+                expires_at=self.expires_at,
             )
         except Exception as exc:
             log.exception("Deploy command failed")
@@ -587,6 +738,19 @@ class DeployOSView(discord.ui.View):
                 view=None,
             )
             return
+        if hasattr(self.bot, "audit_log"):
+            exp_note = (
+                f"Expires {_discord_time(instance.expires_at, 'R')}"
+                if instance.expires_at
+                else "No expiry"
+            )
+            await self.bot.audit_log(
+                "VPS Deployed",
+                actor_id=self.actor.user_id,
+                instance=instance,
+                detail=exp_note,
+                color=SUCCESS,
+            )
         in_dm = interaction.guild_id is None
         stats = await self.bot.manager.stats(self.actor, instance.id)
         view = ManageView(self.bot, self.actor, [instance], instance.id, in_dm=in_dm)
@@ -693,7 +857,12 @@ class ConfirmView(discord.ui.View):
         self.bot = bot
         self.handled = False
         self.message: discord.Message | None = None
-        self.confirm.label = "Delete permanently" if action == "delete" else "Wipe & reinstall"
+        if action == "delete":
+            self.confirm.label = "Delete permanently"
+        elif action == "restore":
+            self.confirm.label = "Restore snapshot"
+        else:
+            self.confirm.label = "Wipe & reinstall"
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         actor = self.actor
@@ -744,11 +913,38 @@ class ConfirmView(discord.ui.View):
             if self.action == "delete":
                 await self.manager.delete(self.actor, self.instance.id)
                 text = "VPS deleted."
+                if self.bot is not None and hasattr(self.bot, "audit_log"):
+                    await self.bot.audit_log(
+                        "VPS Deleted",
+                        actor_id=self.actor.user_id,
+                        instance=self.instance,
+                        color=DANGER,
+                    )
+            elif self.action == "restore":
+                instance = await self.manager.restore(self.actor, self.instance.id)
+                self.instance = instance
+                text = "Home snapshot restored into `/home/noir`."
+                if self.bot is not None and hasattr(self.bot, "audit_log"):
+                    await self.bot.audit_log(
+                        "Backup Restored",
+                        actor_id=self.actor.user_id,
+                        instance=instance,
+                        color=WARNING,
+                    )
             else:
                 instance = await self.manager.reinstall(
                     self.actor, self.instance.id, os_key=self.os_key
                 )
+                self.instance = instance
                 text = f"VPS reinstalled with {os_label(instance.os)}. Previous files were erased."
+                if self.bot is not None and hasattr(self.bot, "audit_log"):
+                    await self.bot.audit_log(
+                        "VPS Reinstalled",
+                        actor_id=self.actor.user_id,
+                        instance=instance,
+                        detail=f"OS `{instance.os}`",
+                        color=WARNING,
+                    )
         except Exception as exc:
             log.exception("Confirmation action failed for %s", self.instance.id)
             text = error_text(exc)
@@ -935,6 +1131,17 @@ class ManageView(discord.ui.View):
         elif len(instances) > 25:
             # Discord selects max out at 25. Specific IDs remain accessible by command.
             self.select_note = True
+        self._sync_button_states()
+
+    def _sync_button_states(self) -> None:
+        inst = self.current()
+        suspended = bool(inst and inst.is_suspended)
+        for btn in (self.start, self.stop, self.restart, self.sshx, self.reinstall):
+            btn.disabled = suspended
+        self.backup.disabled = suspended and not self.actor.is_admin
+        self.restore.disabled = (suspended and not self.actor.is_admin) or not bool(
+            inst and inst.backup_at
+        )
 
     def current(self) -> Instance | None:
         return next((i for i in self.instances if i.id == self.selected), None)
@@ -968,6 +1175,7 @@ class ManageView(discord.ui.View):
             self.selected = values[0]
         instance = await self.manager.get(self.actor, self.selected)
         self._replace_instance(instance)
+        self._sync_button_states()
         stats = await self.manager.stats(self.actor, instance.id)
         await interaction.response.edit_message(
             embed=instance_embed(instance, stats, index=self.current_index()),
@@ -999,12 +1207,23 @@ class ManageView(discord.ui.View):
         try:
             instance = await getattr(self.manager, action)(self.actor, self.selected)
             self._replace_instance(instance)
+            self._sync_button_states()
             stats = await self.manager.stats(self.actor, instance.id)
             await self._edit_panel(
                 interaction,
                 instance_embed(instance, stats, index=self.current_index()),
                 self,
             )
+            if hasattr(self.bot, "audit_log"):
+                labels = {
+                    "start": ("VPS Started", SUCCESS),
+                    "stop": ("VPS Stopped", WARNING),
+                    "restart": ("VPS Restarted", ACCENT),
+                }
+                ev, col = labels.get(action, (f"VPS {action.capitalize()}", COLOR))
+                await self.bot.audit_log(
+                    ev, actor_id=self.actor.user_id, instance=instance, color=col
+                )
         except Exception as exc:
             log.exception("Manage action %s failed", action)
             await interaction.followup.send(error_text(exc), ephemeral=True)
@@ -1016,6 +1235,10 @@ class ManageView(discord.ui.View):
     @discord.ui.button(label="Stop", style=discord.ButtonStyle.secondary, row=1)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._power(interaction, "stop")
+
+    @discord.ui.button(label="Restart", style=discord.ButtonStyle.secondary, row=1)
+    async def restart(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._power(interaction, "restart")
 
     @discord.ui.button(label="Console", style=discord.ButtonStyle.primary, row=1)
     async def sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1029,6 +1252,13 @@ class ManageView(discord.ui.View):
                 ephemeral=True,
                 wait=True,
             )
+            if hasattr(self.bot, "audit_log"):
+                await self.bot.audit_log(
+                    "Root Console Opened",
+                    actor_id=self.actor.user_id,
+                    instance=instance,
+                    color=ACCENT,
+                )
         except Exception as exc:
             log.exception("SSHX failed")
             await interaction.followup.send(error_text(exc), ephemeral=True)
@@ -1039,6 +1269,7 @@ class ManageView(discord.ui.View):
         try:
             instance = await self.manager.refresh(self.actor, self.selected)
             self._replace_instance(instance)
+            self._sync_button_states()
             live = await self.manager.stats(self.actor, instance.id)
             await self._edit_panel(
                 interaction,
@@ -1047,6 +1278,60 @@ class ManageView(discord.ui.View):
             )
         except Exception as exc:
             await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="Backup", style=discord.ButtonStyle.secondary, row=2)
+    async def backup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            instance = await self.manager.backup(self.actor, self.selected)
+            self._replace_instance(instance)
+            self._sync_button_states()
+            live = await self.manager.stats(self.actor, instance.id)
+            await self._edit_panel(
+                interaction,
+                instance_embed(instance, live, index=self.current_index()),
+                self,
+            )
+            await interaction.followup.send(
+                embed=action_card_embed(
+                    "Backup Snapshot Saved",
+                    instance,
+                    status_line="Snapshot Ready · `/home/noir` Archived",
+                    detail_line=(
+                        "**Saved** — click **Restore** anytime to roll "
+                        "`/home/noir` back to this snapshot"
+                    ),
+                    color=SUCCESS,
+                ),
+                ephemeral=True,
+            )
+            if hasattr(self.bot, "audit_log"):
+                await self.bot.audit_log(
+                    "Backup Created",
+                    actor_id=self.actor.user_id,
+                    instance=instance,
+                    color=SUCCESS,
+                )
+        except Exception as exc:
+            log.exception("Backup failed")
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="Restore", style=discord.ButtonStyle.secondary, row=2)
+    async def restore(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            instance = await self.manager.get(self.actor, self.selected)
+            if not instance.backup_at:
+                raise UserError("No backup snapshot exists yet. Click **Backup** first.")
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = ConfirmView(self.manager, self.actor, instance, "restore", bot=self.bot)
+        await interaction.response.send_message(
+            embed=confirm_embed(instance, "restore"),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
 
     @discord.ui.button(label="Reinstall", style=discord.ButtonStyle.danger, row=2)
     async def reinstall(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1063,7 +1348,7 @@ class ManageView(discord.ui.View):
         )
         view.message = await interaction.original_response()
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=3)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         try:
@@ -1107,7 +1392,7 @@ class ManageView(discord.ui.View):
         )
         view.message = await interaction.original_response()
 
-    @discord.ui.button(label="Open in DM", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Open in DM", style=discord.ButtonStyle.secondary, row=3)
     async def send_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -1245,3 +1530,148 @@ class SSHXView(discord.ui.View):
             await interaction.edit_original_response(**edit_kwargs)
         except Exception as exc:
             await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class FleetView(discord.ui.View):
+    """Admin paginated fleet browser with quick-manage selector."""
+
+    PAGE_SIZE = 10
+
+    def __init__(
+        self,
+        bot,
+        actor: Actor,
+        instances: list[Instance],
+        *,
+        owner_id: int | None = None,
+        page: int = 0,
+    ):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.actor = actor
+        self.instances = instances
+        self.owner_id = owner_id
+        self.page = page
+        self.message: discord.Message | None = None
+        self._rebuild()
+
+    @property
+    def pages(self) -> int:
+        return max(1, (len(self.instances) + self.PAGE_SIZE - 1) // self.PAGE_SIZE)
+
+    def _rebuild(self) -> None:
+        self.clear_items()
+        chunk = self.instances[self.page * self.PAGE_SIZE : (self.page + 1) * self.PAGE_SIZE]
+        if chunk:
+            options = [
+                discord.SelectOption(
+                    label=f"Manage {i.id}",
+                    description=f"Owner {i.owner_id} · {i.os} · {i.specs.label()} · {i.status}"[
+                        :100
+                    ],
+                    value=i.id,
+                )
+                for i in chunk
+            ]
+            select = discord.ui.Select(
+                placeholder="Quick-open a VPS panel…", options=options, row=0
+            )
+            select.callback = self._open_manage  # type: ignore[method-assign]
+            self.add_item(select)
+        if self.pages > 1:
+            prev_btn = discord.ui.Button(
+                label="Previous",
+                style=discord.ButtonStyle.secondary,
+                disabled=self.page <= 0,
+                row=1,
+            )
+            next_btn = discord.ui.Button(
+                label="Next",
+                style=discord.ButtonStyle.secondary,
+                disabled=self.page >= self.pages - 1,
+                row=1,
+            )
+            prev_btn.callback = self._prev  # type: ignore[method-assign]
+            next_btn.callback = self._next  # type: ignore[method-assign]
+            self.add_item(prev_btn)
+            self.add_item(next_btn)
+        refresh_btn = discord.ui.Button(label="Refresh", style=discord.ButtonStyle.secondary, row=1)
+        refresh_btn.callback = self._refresh  # type: ignore[method-assign]
+        self.add_item(refresh_btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+        except UserError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
+        if not actor.is_admin or actor.guild_id != self.actor.guild_id:
+            await interaction.response.send_message(
+                "Only server administrators can browse the fleet.", ephemeral=True
+            )
+            return False
+        self.actor = actor
+        return True
+
+    async def _open_manage(self, interaction: discord.Interaction) -> None:
+        values = interaction.data.get("values", [])  # type: ignore[union-attr]
+        if not values:
+            return
+        instance_id = values[0]
+        try:
+            instance = await self.bot.manager.get(self.actor, instance_id)
+            stats = await self.bot.manager.stats(self.actor, instance.id)
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = ManageView(
+            self.bot,
+            self.actor,
+            [instance],
+            instance.id,
+            in_dm=interaction.guild_id is None,
+        )
+        await interaction.response.send_message(
+            embed=instance_embed(instance, stats, index=1),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
+    async def _prev(self, interaction: discord.Interaction) -> None:
+        self.page = max(0, self.page - 1)
+        self._rebuild()
+        await interaction.response.edit_message(
+            embed=fleet_embed(self.instances, self.page, owner_id=self.owner_id), view=self
+        )
+
+    async def _next(self, interaction: discord.Interaction) -> None:
+        self.page = min(self.pages - 1, self.page + 1)
+        self._rebuild()
+        await interaction.response.edit_message(
+            embed=fleet_embed(self.instances, self.page, owner_id=self.owner_id), view=self
+        )
+
+    async def _refresh(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer()
+        try:
+            self.instances = await self.bot.manager.list(self.actor, owner_id=self.owner_id)
+            self.page = min(self.page, self.pages - 1)
+            self._rebuild()
+            embed = fleet_embed(self.instances, self.page, owner_id=self.owner_id)
+            target = self.message or interaction.message
+            if target is not None:
+                await target.edit(embed=embed, view=self)
+            else:
+                await interaction.edit_original_response(embed=embed, view=self)
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass

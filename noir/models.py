@@ -10,7 +10,16 @@ from .os_catalog import DEFAULT_OS
 # New VPS IDs use the noir- prefix. Legacy fier- IDs from pre-NOIR installs
 # remain valid so existing VPSes keep working after the rename.
 ID_PATTERN = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
-STATUSES = {"provisioning", "running", "stopped", "reinstalling", "deleting", "error"}
+DURATION_RE = re.compile(r"([1-9][0-9]{0,3})([smhdw])\Z", re.IGNORECASE)
+STATUSES = {
+    "provisioning",
+    "running",
+    "stopped",
+    "suspended",
+    "reinstalling",
+    "deleting",
+    "error",
+}
 
 
 def valid_id(value: str) -> bool:
@@ -19,6 +28,38 @@ def valid_id(value: str) -> bool:
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def parse_duration_seconds(raw: str) -> int:
+    match = DURATION_RE.fullmatch(raw.strip())
+    if not match:
+        raise UserError(
+            "Invalid duration. Use a number + unit such as `30d`, `7d`, `12h`, or `2w`."
+        )
+    amount = int(match.group(1))
+    unit = match.group(2).lower()
+    factors = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 604800}
+    seconds = amount * factors[unit]
+    if seconds > 3650 * 86400:
+        raise UserError("Duration cannot exceed 10 years.")
+    return seconds
+
+
+def future_iso(seconds: int, *, base_iso: str | None = None) -> str:
+    from datetime import timedelta
+
+    now = datetime.now(timezone.utc)
+    base = now
+    if base_iso:
+        try:
+            parsed = datetime.fromisoformat(base_iso)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            if parsed > now:
+                base = parsed
+        except ValueError:
+            pass
+    return (base + timedelta(seconds=seconds)).isoformat()
 
 
 @dataclass(frozen=True)
@@ -83,6 +124,7 @@ class HostStatus:
     reserved_ram_gb: int
     reserved_cpu: int
     reserved_disk_gb: int
+    suspended_vps: int = 0
 
 
 @dataclass(frozen=True)
@@ -98,6 +140,13 @@ class Instance:
     created_at: str
     updated_at: str
     os: str = DEFAULT_OS
+    expires_at: str | None = None
+    suspended_reason: str | None = None
+    backup_at: str | None = None
+
+    @property
+    def is_suspended(self) -> bool:
+        return self.status == "suspended"
 
     @property
     def specs(self) -> Specs:

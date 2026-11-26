@@ -18,7 +18,11 @@ def settings(tmp_path: Path) -> Settings:
         allowed_guild_id=987654321,
         admin_ids=frozenset(),
         data_dir=tmp_path,
-        images={"ubuntu-24.04": "noir-vps:local", "debian-12": "noir-vps:debian-12"},
+        images={
+            "ubuntu-24.04": "noir-vps:local",
+            "ubuntu-22.04": "noir-vps:ubuntu-22.04",
+            "debian-12": "noir-vps:debian-12",
+        },
         network="noir-vps",
         volume_helper=Path("/usr/local/libexec/noir-volume"),
         max_ram_gb=4,
