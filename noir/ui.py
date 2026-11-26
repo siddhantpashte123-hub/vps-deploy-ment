@@ -7,7 +7,7 @@ from pathlib import Path
 import discord
 
 from .errors import NoirError, UserError
-from .models import Actor, Instance, LiveStats, Specs
+from .models import Actor, HostStatus, Instance, LiveStats, Specs
 from .os_catalog import DEFAULT_OS, OS_CHOICES, os_choice, os_label
 
 log = logging.getLogger(__name__)
@@ -65,10 +65,8 @@ def banner_file() -> discord.File | None:
     return None
 
 
-def _brand(embed: discord.Embed, subtitle: str = "Private Cloud & Root VPS") -> discord.Embed:
-    embed.set_footer(text=f"NOIR Utility • {subtitle}")
-    if BANNER_PATH.is_file():
-        embed.set_image(url=f"attachment://{BANNER_FILENAME}")
+def _brand(embed: discord.Embed, subtitle: str = "NOIR Cloud") -> discord.Embed:
+    embed.set_footer(text=subtitle)
     return embed
 
 
@@ -170,87 +168,167 @@ def instance_embed(
 
 def empty_embed() -> discord.Embed:
     embed = discord.Embed(
-        title="NOIR Cloud Panel",
+        title="VPS Console — No Active Instance",
         description=(
-            "You do not have an active VPS yet. Ask a server administrator to provision "
-            "a dedicated root container for you, or deploy one if you are an admin:\n"
-            "```text\n!deploy 1 1 1 @user\n```\n"
-            "Once created, you can control your VPS in the server or anytime in **bot DMs** "
-            "using `!manage`."
+            "`noir-empty`\n"
+            "> **Status** Idle · No VPS Assigned\n\n"
+            "> **Deploy** `!deploy 1 1 1 @user` *(Admin Only)*\n"
+            "> **Images** `ubuntu-24.04` • `debian-12`\n"
+            "> **Control** Server Channel or Bot DMs (`!manage`)\n\n"
+            "> Ask a server administrator to provision a root VPS for you."
         ),
-        color=COLOR,
+        color=WARNING,
     )
-    embed.set_author(name="NOIR Utility")
-    return _brand(embed, "Interactive Cloud Control")
+    return _brand(embed, "NOIR Cloud")
 
 
 def panel_hub_embed(guild_name: str, count: int) -> discord.Embed:
+    plural = "" if count == 1 else "s"
     embed = discord.Embed(
-        title="Server Cloud Panel",
+        title=f"Server Cloud Panel — `{guild_name}`",
         description=(
-            "Manage your isolated Ubuntu 24.04 or Debian 12 root VPS directly from Discord! "
-            "Click a button below to open your personal control panel here or have NOIR send "
-            "a private control console to your **DMs**."
+            f"`noir-fleet-{count}`\n"
+            f"> **Status** Online · Ready\n\n"
+            f"> **Active Fleet** {count} Provisioned VPS Instance{plural}\n"
+            f"> **OS Images** Ubuntu 24.04 LTS • Debian 12\n"
+            f"> **Direct Messages** `!manage` • `!help` anytime in Bot DMs\n\n"
+            f"> Click **My VPS** to open your console here or "
+            f"**Control in DM** to manage privately."
         ),
         color=COLOR,
     )
-    embed.set_author(name=f"NOIR • {guild_name}")
-    embed.add_field(
-        name="Active Fleet",
-        value=f"**{count}** provisioned VPS instance{'s' if count != 1 else ''}",
-        inline=True,
-    )
-    embed.add_field(
-        name="Direct Messages",
-        value="Send `!manage` or `!help` to NOIR in DMs anytime",
-        inline=True,
-    )
-    return _brand(embed, "Constructive & Interactive Cloud Control")
+    return _brand(embed, "NOIR Utility • Interactive Cloud Control")
 
 
 def help_embed(settings) -> discord.Embed:
     embed = discord.Embed(
-        title="NOIR Command & DM Guide",
+        title="NOIR — Command & DM Reference",
         description=(
-            "Admin-provisioned Ubuntu 24.04 & Debian 12 root containers. "
-            "Every control command works both in your locked Discord server **and in bot DMs**."
+            "`noir-cli-guide`\n"
+            "> **Status** Online · Server & DM Control Enabled\n\n"
+            "> **Owner / DM** `!manage [id]` • `!panel` • `!delete <id>` • `!delete 1 1 1`\n"
+            "> **Admin Deploy** `!deploy RAM CPU DISK [@user]` *(Ubuntu 24.04 / Debian 12)*\n"
+            "> **Admin Tools** `!status` *(Host Node Dashboard)* • `!delete @user`\n\n"
+            f"> **Per-User Limit** {settings.max_per_user} VPS • **Max Plan** "
+            f"{settings.max_ram_gb}GB RAM / {settings.max_cpu} CPU / "
+            f"{settings.max_disk_gb}GB Disk\n"
+            "> **Tip** Send `!manage` directly to NOIR in **DMs** anytime."
         ),
         color=COLOR,
     )
-    embed.set_author(name="NOIR Utility")
-    embed.add_field(
-        name="My VPS & DM Control",
-        value=(
-            "`!manage` or `!manage <id>` — Start · Stop · Console · Stats · Reinstall · Refresh\n"
-            "`!panel` — Post an interactive **My VPS / Control in DM** hub card\n"
-            "💬 **In bot DMs:** send `!manage`, `!delete <id>`, "
-            "`!deploy 1 1 1 <@USER_ID>`, or `!help`"
+    return _brand(embed, "NOIR Cloud")
+
+
+def host_status_embed(host: HostStatus) -> discord.Embed:
+    ram_used_gb = host.ram_used_bytes / (1024**3)
+    ram_total_gb = max(0.1, host.ram_total_bytes / (1024**3))
+    ram_pct = (
+        min(100.0, (host.ram_used_bytes / host.ram_total_bytes * 100.0))
+        if host.ram_total_bytes
+        else 0.0
+    )
+    disk_used_gb = host.disk_used_bytes / (1024**3)
+    disk_total_gb = max(0.1, host.disk_total_bytes / (1024**3))
+    disk_free_gb = max(0.0, disk_total_gb - disk_used_gb)
+    disk_pct = (
+        min(100.0, (host.disk_used_bytes / host.disk_total_bytes * 100.0))
+        if host.disk_total_bytes
+        else 0.0
+    )
+    cores_word = "Core" if host.cpu_cores == 1 else "Cores"
+    uptime_text = _format_uptime(host.uptime_seconds, True)
+    color = DANGER if (ram_pct >= 90.0 or disk_pct >= 90.0) else SUCCESS
+
+    embed = discord.Embed(
+        title=f"Host Node — `{host.hostname}`",
+        description=(
+            f"`noir-host-telemetry`\n"
+            f"> **Status** Online · Healthy\n\n"
+            f"> **CPU** {host.cpu_cores} {cores_word} • **Load** {host.load_1m:.2f} • "
+            f"**Storage Mode** `{host.storage_mode}`\n"
+            f"> **Fleet** {host.running_vps} Running • {host.stopped_vps} Stopped • "
+            f"{host.total_vps} / {host.max_total_vps} Total VPS\n"
+            f"> **Uptime** {uptime_text}\n\n"
+            f"> **CPU** {host.cpu_percent:.1f}% • **RAM** {ram_used_gb:.1f}GB / "
+            f"{ram_total_gb:.1f}GB ({ram_pct:.1f}%) • **Disk** {disk_used_gb:.1f}GB / "
+            f"{disk_total_gb:.1f}GB ({disk_pct:.1f}% · {disk_free_gb:.1f}GB Free)\n"
+            f"> **Allocated to VPSes** {host.reserved_ram_gb}GB RAM • "
+            f"{host.reserved_cpu} vCPU • {host.reserved_disk_gb}GB Disk"
         ),
-        inline=False,
+        color=color,
     )
-    embed.add_field(
-        name="Deploy (Admins Only)",
-        value=(
-            "`!deploy 1 1 1 @user` (or `<@USER_ID>` in DMs) — create a VPS for a server member\n"
-            "`!deploy 1 1 1` — create a VPS for yourself\n"
-            "Format: `RAM GiB` · `CPU cores` · `Disk GiB`, then pick Ubuntu 24.04 or Debian 12."
+    return _brand(embed, "NOIR Cloud • Host Node Dashboard")
+
+
+def sshx_embed(instance: Instance, *, closed: bool = False) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    cores_word = "Core" if instance.cpu == 1 else "Cores"
+    if closed:
+        status_line = "Closed · Link Revoked"
+        note = "**Session terminated** — click **Console** on the VPS panel to open a new shell"
+        color = MUTED
+    else:
+        status_line = "Active · Private Root Shell"
+        note = (
+            "**Root access** — do not share this link. Closing this message does not revoke it; "
+            "click **Close Session** when finished"
+        )
+        color = SUCCESS
+    embed = discord.Embed(
+        title=f"Root Console — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** {status_line}\n\n"
+            f"> **User** `root` • **OS** {instance.os} • **Config** "
+            f"{instance.ram_gb}GB RAM / {instance.cpu} {cores_word} / {instance.disk_gb}GB Disk\n"
+            f"> **Home** `/home/noir` *(Persistent)* • **Network** Isolated Bridge\n\n"
+            f"> {note}"
         ),
-        inline=False,
+        color=color,
     )
-    embed.add_field(
-        name="Delete",
-        value=(
-            "`!delete @user` — admin selects **one** of that member's VPSes, then confirms\n"
-            "`!delete <id>` or `!delete 1 1 1` — delete your own matching VPS "
-            "(confirmation required)"
+    return _brand(embed, "NOIR Cloud • Ephemeral Root Console")
+
+
+def confirm_embed(
+    instance: Instance, action: str, *, os_key: str | None = None, state: str = "pending"
+) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    cores_word = "Core" if instance.cpu == 1 else "Cores"
+    if action == "delete":
+        heading = f"Delete VPS — VMID `{vmid}`"
+        target_os = instance.os
+        warning_line = (
+            "**Permanent action** — container, `/home/noir` disk, and all files will be destroyed"
+        )
+    else:
+        heading = f"Reinstall VPS — VMID `{vmid}`"
+        target_os = os_key or instance.os
+        warning_line = (
+            f"**Destructive reinstall** — wipes `/home/noir` and installs "
+            f"fresh **{os_label(target_os)}**"
+        )
+    if state == "done":
+        status_line = "Completed"
+        color = SUCCESS if action != "delete" else MUTED
+    elif state == "cancelled":
+        status_line = "Cancelled · No Changes Made"
+        color = MUTED
+    else:
+        status_line = "Awaiting Confirmation"
+        color = DANGER
+    embed = discord.Embed(
+        title=heading,
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** {status_line}\n\n"
+            f"> **RAM** {instance.ram_gb}GB • **CPU** {instance.cpu} {cores_word} • "
+            f"**Storage** {instance.disk_gb}GB\n"
+            f"> **OS** {target_os} • **Owner** <@{instance.owner_id}>\n\n"
+            f"> {warning_line}"
         ),
-        inline=False,
+        color=color,
     )
-    return _brand(
-        embed,
-        f"Limit: {settings.max_per_user}/user • Max plan: "
-        f"{settings.max_ram_gb} GiB RAM / {settings.max_cpu} CPU / {settings.max_disk_gb} GiB disk",
-    )
+    return _brand(embed, "NOIR Cloud")
 
 
 def user_delete_embed(owner_id: int, instances: list[Instance], page: int = 0) -> discord.Embed:
@@ -259,26 +337,22 @@ def user_delete_embed(owner_id: int, instances: list[Instance], page: int = 0) -
     page = max(0, min(page, pages - 1))
     chunk = instances[page * page_size : (page + 1) * page_size]
     lines = [
-        f"• `{i.id}` · **{os_label(i.os)}** · {i.specs.label()} · `{i.status.upper()}`"
+        f"> `{i.id}` • **{i.os}** • {i.ram_gb}GB/{i.cpu}C/{i.disk_gb}GB • `{i.status.upper()}`"
         for i in chunk
     ]
     embed = discord.Embed(
-        title="Delete Member VPS",
+        title=f"Delete Member VPS — Page {page + 1}/{pages}",
         description=(
-            f"**Target:** <@{owner_id}>\n"
-            "Select **one** VPS from the menu below, then confirm. "
-            "Nothing is deleted until you confirm.\n\n" + "\n".join(lines)
+            f"`owner-{owner_id}`\n"
+            f"> **Status** Select One Instance · Confirmation Required\n"
+            f"> **Target** <@{owner_id}> ({len(instances)} VPS)\n\n" + "\n".join(lines)
         ),
         color=DANGER,
     )
-    embed.set_author(name="NOIR Admin")
-    embed.set_footer(text=f"NOIR Utility • Page {page + 1}/{pages} • Confirmation required")
-    if BANNER_PATH.is_file():
-        embed.set_image(url=f"attachment://{BANNER_FILENAME}")
-    return embed
+    return _brand(embed, f"NOIR Cloud • Page {page + 1}/{pages} • Confirmation required")
 
 
-def _bar(percent: int, width: int = 12) -> str:
+def _bar(percent: int, width: int = 14) -> str:
     percent = max(0, min(100, percent))
     filled = round(width * percent / 100)
     return "█" * filled + "░" * (width - filled)
@@ -293,72 +367,78 @@ def deploy_progress_embed(
 ) -> discord.Embed:
     percent = max(0, min(100, percent))
     current = next((label for key, label, _ in DEPLOY_STAGES if key == stage), "Working")
-    status_pill = "🟢 ONLINE" if percent >= 100 else "🟡 PROVISIONING"
+    status_line = "Online · Ready" if percent >= 100 else f"Provisioning · {percent}%"
+    cores_word = "Core" if specs.cpu == 1 else "Cores"
+    owner_part = f" • **Owner** <@{owner_id}>" if owner_id is not None else ""
     pipeline = []
     for key, label, threshold in DEPLOY_STAGES:
         if percent >= 100 or threshold < percent:
-            pipeline.append(f"✅ {label}")
+            pipeline.append(f"> `[DONE]` {label}")
         elif key == stage:
-            pipeline.append(f"🔄 **{label}**")
+            pipeline.append(f"> `[WORK]` **{label}**")
         else:
-            pipeline.append(f"⬜ {label}")
+            pipeline.append(f"> `[WAIT]` {label}")
     embed = discord.Embed(
-        title="Provisioning Root VPS",
+        title=f"Provisioning VPS — `{percent}%`",
         description=(
-            f"**Status**\n`{status_pill}` · **{percent}%**\n"
-            f"`{_bar(percent)}` — **{current}**\n\n" + "\n".join(pipeline)
+            f"`{_bar(percent)}` **{current}**\n"
+            f"> **Status** {status_line}\n\n"
+            f"> **RAM** {specs.ram_gb}GB • **CPU** {specs.cpu} {cores_word} • "
+            f"**Storage** {specs.disk_gb}GB\n"
+            f"> **OS** {os_label(os_key)} (`{os_key}`){owner_part}\n\n" + "\n".join(pipeline)
         ),
         color=ACCENT if percent < 100 else SUCCESS,
     )
-    embed.set_author(name="NOIR Cloud")
-    embed.add_field(name="Plan", value=specs.label(), inline=True)
-    embed.add_field(name="OS", value=os_label(os_key), inline=True)
-    embed.add_field(name="Access", value="Root SSHX terminal", inline=True)
-    if owner_id is not None:
-        embed.add_field(name="Owner", value=f"<@{owner_id}>", inline=True)
-    return _brand(embed, "Live Provisioning Pipeline")
+    return _brand(embed, "NOIR Cloud • Live Provisioning")
 
 
 def deploy_failure_embed(
     specs: Specs, message: str, os_key: str = DEFAULT_OS, owner_id: int | None = None
 ) -> discord.Embed:
+    cores_word = "Core" if specs.cpu == 1 else "Cores"
+    owner_part = f" • **Owner** <@{owner_id}>" if owner_id is not None else ""
     embed = discord.Embed(
         title="NOIR · Deployment failed",
-        description=f"**Status**\n`🔴 FAILED`\n\n{message}",
+        description=(
+            f"`deploy-aborted`\n"
+            f"> **Status** Failed · Rolled Back\n\n"
+            f"> **RAM** {specs.ram_gb}GB • **CPU** {specs.cpu} {cores_word} • "
+            f"**Storage** {specs.disk_gb}GB\n"
+            f"> **OS** {os_label(os_key)} (`{os_key}`){owner_part}\n\n"
+            f"> **Reason** {message}"
+        ),
         color=DANGER,
     )
-    embed.set_author(name="NOIR Cloud")
-    embed.add_field(name="Plan", value=specs.label(), inline=True)
-    embed.add_field(name="OS", value=os_label(os_key), inline=True)
-    if owner_id is not None:
-        embed.add_field(name="Owner", value=f"<@{owner_id}>", inline=True)
-    return _brand(embed, "Provisioning Aborted")
+    return _brand(embed, "NOIR Cloud")
 
 
 def os_choice_embed(
     specs: Specs, owner_id: int | None = None, *, reinstall: bool = False
 ) -> discord.Embed:
     action = "Reinstall" if reinstall else "Deploy"
+    cores_word = "Core" if specs.cpu == 1 else "Cores"
+    owner_line = f"> **Owner** <@{owner_id}>\n" if owner_id is not None else ""
+    images_line = " • ".join(f"**{c.label}** (`{c.id}`)" for c in OS_CHOICES)
+    note_line = (
+        "> **Warning** Reinstalling **permanently erases all files** in `/home/noir`."
+        if reinstall
+        else "> **Access** Root SSHX Console • Python, Node.js, Git & build tools preinstalled"
+    )
     embed = discord.Embed(
-        title=f"Select Operating System · {action}",
+        title=f"{action} VPS — Select Operating System",
         description=(
-            "**Status**\n`🟡 AWAITING OS SELECTION`\n\n"
-            "Choose the Linux distribution for this isolated root VPS. "
-            "Both images include Python, Node.js, Git, build tools, and SSHX."
-            + ("\n\n⚠️ Reinstalling **permanently erases all files**." if reinstall else "")
+            f"`plan-{specs.ram_gb}g-{specs.cpu}c-{specs.disk_gb}g`\n"
+            f"> **Status** Awaiting OS Selection\n\n"
+            f"> **RAM** {specs.ram_gb}GB • **CPU** {specs.cpu} {cores_word} • "
+            f"**Storage** {specs.disk_gb}GB\n"
+            f"> **Config** {specs.ram_gb}GB RAM / {specs.cpu} CPU / {specs.disk_gb}GB Disk\n"
+            f"{owner_line}\n"
+            f"> **Images** {images_line}\n"
+            f"{note_line}"
         ),
-        color=ACCENT,
+        color=WARNING if reinstall else ACCENT,
     )
-    embed.set_author(name="NOIR Cloud")
-    embed.add_field(name="Plan", value=specs.label(), inline=True)
-    if owner_id is not None:
-        embed.add_field(name="Owner", value=f"<@{owner_id}>", inline=True)
-    embed.add_field(
-        name="Available Images",
-        value="\n".join(f"{choice.emoji} **{choice.label}**" for choice in OS_CHOICES),
-        inline=False,
-    )
-    return _brand(embed, "Ubuntu 24.04 LTS & Debian 12")
+    return _brand(embed, "NOIR Cloud")
 
 
 def _os_select(placeholder: str, selected: str | None = None) -> discord.ui.Select:
@@ -367,7 +447,6 @@ def _os_select(placeholder: str, selected: str | None = None) -> discord.ui.Sele
             label=choice.label,
             value=choice.id,
             description=f"Root VPS · {choice.id}",
-            emoji=choice.emoji,
             default=choice.id == selected,
         )
         for choice in OS_CHOICES
@@ -410,17 +489,12 @@ class PanelHubView(discord.ui.View):
             stats = await self.bot.manager.stats(actor, instances[0].id) if instances else None
             view = ManageView(self.bot, actor, instances, selected, in_dm=True)
             dm = await interaction.user.create_dm()
-            kwargs: dict = {
-                "embed": (
+            view.message = await dm.send(
+                embed=(
                     instance_embed(instances[0], stats, index=1) if instances else empty_embed()
                 ),
-                "view": view,
-            }
-            if not instances:
-                banner = banner_file()
-                if banner is not None:
-                    kwargs["file"] = banner
-            view.message = await dm.send(**kwargs)
+                view=view,
+            )
             await interaction.followup.send(
                 "Sent your **NOIR** control console to your DMs. "
                 "You can also type `!manage` there anytime.",
@@ -517,7 +591,7 @@ class DeployOSView(discord.ui.View):
         stats = await self.bot.manager.stats(self.actor, instance.id)
         view = ManageView(self.bot, self.actor, [instance], instance.id, in_dm=in_dm)
         await message.edit(
-            content=f"✅ VPS deployed for <@{self.owner_id}> · `{instance.id}`",
+            content=None,
             embed=instance_embed(instance, stats, index=1),
             attachments=[],
             view=view,
@@ -583,12 +657,8 @@ class ReinstallOSView(discord.ui.View):
             self.bot.manager, self.actor, instance, "reinstall", os_key=choice.id, bot=self.bot
         )
         await interaction.response.edit_message(
-            content=(
-                f"♻️ **Wipe `{instance.id}` and reinstall {choice.label}?** "
-                "This permanently erases its files, installed packages, and running processes, "
-                "then creates a fresh root container with the same resources."
-            ),
-            embed=None,
+            content=None,
+            embed=confirm_embed(instance, "reinstall", os_key=choice.id),
             attachments=[],
             view=view,
         )
@@ -641,14 +711,22 @@ class ConfirmView(discord.ui.View):
         self.actor = actor
         return True
 
-    async def _finish(self, interaction: discord.Interaction, text: str) -> None:
+    async def _finish(
+        self, interaction: discord.Interaction, text: str, *, ok: bool = True
+    ) -> None:
         for child in self.children:
             child.disabled = True  # type: ignore[attr-defined]
+        embed = confirm_embed(
+            self.instance,
+            self.action,
+            os_key=self.os_key,
+            state="done" if ok else "cancelled",
+        )
         try:
             if self.message:
-                await self.message.edit(view=self)
+                await self.message.edit(embed=embed, view=self)
             elif interaction.message:
-                await interaction.message.edit(view=self)
+                await interaction.message.edit(embed=embed, view=self)
         except discord.HTTPException:
             pass
         await interaction.followup.send(text, ephemeral=True)
@@ -661,6 +739,7 @@ class ConfirmView(discord.ui.View):
             return
         self.handled = True
         await interaction.response.defer(ephemeral=True, thinking=True)
+        ok = True
         try:
             if self.action == "delete":
                 await self.manager.delete(self.actor, self.instance.id)
@@ -673,7 +752,8 @@ class ConfirmView(discord.ui.View):
         except Exception as exc:
             log.exception("Confirmation action failed for %s", self.instance.id)
             text = error_text(exc)
-        await self._finish(interaction, text)
+            ok = False
+        await self._finish(interaction, text, ok=ok)
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -684,11 +764,12 @@ class ConfirmView(discord.ui.View):
     async def _finish_no_response(self, interaction: discord.Interaction) -> None:
         for child in self.children:
             child.disabled = True  # type: ignore[attr-defined]
+        embed = confirm_embed(self.instance, self.action, os_key=self.os_key, state="cancelled")
         try:
             if self.message:
-                await self.message.edit(view=self)
+                await self.message.edit(embed=embed, view=self)
             elif interaction.message:
-                await interaction.message.edit(view=self)
+                await interaction.message.edit(embed=embed, view=self)
         except discord.HTTPException:
             pass
         self.stop()
@@ -734,7 +815,6 @@ class UserDeleteView(discord.ui.View):
                 label=i.id,
                 value=i.id,
                 description=f"{os_label(i.os)} · {i.specs.label()} · {i.status}"[:100],
-                emoji="🗑️",
             )
             for i in chunk
         ]
@@ -785,15 +865,13 @@ class UserDeleteView(discord.ui.View):
         self.stop()
         view = ConfirmView(self.manager, self.actor, instance, "delete", bot=self.bot)
         await interaction.response.send_message(
-            f"⚠️ **Delete `{instance.id}` owned by <@{self.owner_id}>?** "
-            f"{os_label(instance.os)} · {instance.specs.label()}. "
-            "All files and processes will be permanently destroyed.",
+            embed=confirm_embed(instance, "delete"),
             view=view,
             ephemeral=True,
         )
         view.message = await interaction.original_response()
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, row=1)
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page -= 1
         self._rebuild()
@@ -801,7 +879,7 @@ class UserDeleteView(discord.ui.View):
             embed=user_delete_embed(self.owner_id, self.instances, self.page), view=self
         )
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, row=1)
     async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page += 1
         self._rebuild()
@@ -944,12 +1022,9 @@ class ManageView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             instance, url = await self.manager.sshx(self.actor, self.selected)
-            view = SSHXView(self.manager, self.actor, instance.id, url)
+            view = SSHXView(self.manager, self.actor, instance.id, url, instance=instance)
             view.message = await interaction.followup.send(
-                f"🔐 **Private root console for `{instance.id}`**\n"
-                "Anyone with this link gets **root access inside this VPS**. Do not share it. "
-                "The session stays active until you close it or stop/reinstall/delete the VPS. "
-                "Hiding this message or waiting for this panel to expire does not revoke the link.",
+                embed=sshx_embed(instance),
                 view=view,
                 ephemeral=True,
                 wait=True,
@@ -983,7 +1058,6 @@ class ManageView(discord.ui.View):
         view = ReinstallOSView(self.bot, self.actor, instance)
         await interaction.response.send_message(
             embed=os_choice_embed(instance.specs, instance.owner_id, reinstall=True),
-            file=banner_file(),
             view=view,
             ephemeral=True,
         )
@@ -1027,8 +1101,7 @@ class ManageView(discord.ui.View):
             return
         view = ConfirmView(self.manager, self.actor, instance, "delete", bot=self.bot)
         await interaction.response.send_message(
-            f"🗑️ **Permanently delete `{instance.id}`?** Its container and disk will be destroyed. "
-            "This cannot be undone.",
+            embed=confirm_embed(instance, "delete"),
             view=view,
             ephemeral=True,
         )
@@ -1046,19 +1119,14 @@ class ManageView(discord.ui.View):
             dm_view = ManageView(self.bot, self.actor, instances, selected, in_dm=True)
             live = await self.manager.stats(self.actor, current.id) if current else None
             dm = await interaction.user.create_dm()
-            kwargs: dict = {
-                "embed": (
+            dm_view.message = await dm.send(
+                embed=(
                     instance_embed(current, live, index=dm_view.current_index())
                     if current
                     else empty_embed()
                 ),
-                "view": dm_view,
-            }
-            if current is None:
-                banner = banner_file()
-                if banner is not None:
-                    kwargs["file"] = banner
-            dm_view.message = await dm.send(**kwargs)
+                view=dm_view,
+            )
             await interaction.followup.send(
                 "Sent your **NOIR** VPS console to your DMs.", ephemeral=True
             )
@@ -1080,14 +1148,70 @@ class ManageView(discord.ui.View):
                 pass
 
 
+class HostStatusView(discord.ui.View):
+    """Admin-only host node dashboard with silent in-place Refresh."""
+
+    def __init__(self, bot, actor: Actor):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.actor = actor
+        self.message: discord.Message | None = None
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+        except UserError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
+        if not actor.is_admin or actor.guild_id != self.actor.guild_id:
+            await interaction.response.send_message(
+                "Only server administrators can use the host dashboard.", ephemeral=True
+            )
+            return False
+        self.actor = actor
+        return True
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            host = await self.bot.manager.host_status(self.actor)
+            embed = host_status_embed(host)
+            target = self.message or interaction.message
+            if target is not None:
+                await target.edit(embed=embed, view=self)
+            else:
+                await interaction.edit_original_response(embed=embed, view=self)
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+
 class SSHXView(discord.ui.View):
-    def __init__(self, manager, actor: Actor, instance_id: str, url: str):
+    def __init__(
+        self,
+        manager,
+        actor: Actor,
+        instance_id: str,
+        url: str,
+        *,
+        instance: Instance | None = None,
+    ):
         super().__init__(timeout=300)
         self.manager = manager
         self.actor = actor
         self.instance_id = instance_id
+        self.instance = instance
         self.message: discord.WebhookMessage | None = None
-        self.add_item(discord.ui.Button(label="Open root terminal", emoji="↗️", url=url))
+        self.add_item(discord.ui.Button(label="Open root terminal", url=url))
 
     async def on_timeout(self) -> None:
         # Expiring the panel does not revoke the session; the warning says so.
@@ -1107,17 +1231,17 @@ class SSHXView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Close terminal session", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Close Session", style=discord.ButtonStyle.danger)
     async def close_session(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         try:
             await self.manager.close_sshx(self.actor, self.instance_id)
             self.stop()
             for child in self.children:
                 child.disabled = True  # type: ignore[attr-defined]
-            await interaction.edit_original_response(view=self)
-            await interaction.followup.send(
-                "SSHX session closed; its link is no longer usable.", ephemeral=True
-            )
+            edit_kwargs: dict = {"view": self}
+            if self.instance is not None:
+                edit_kwargs["embed"] = sshx_embed(self.instance, closed=True)
+            await interaction.edit_original_response(**edit_kwargs)
         except Exception as exc:
             await interaction.followup.send(error_text(exc), ephemeral=True)

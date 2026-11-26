@@ -13,9 +13,11 @@ from noir.models import Actor, Instance, Specs, utc_now
 from noir.ui import (
     ConfirmView,
     DeployOSView,
+    HostStatusView,
     ManageView,
     PanelHubView,
     ReinstallOSView,
+    SSHXView,
     UserDeleteView,
 )
 
@@ -557,7 +559,7 @@ async def test_user_delete_picker_paginates_over_25(bot, actor):
     assert len(view.select.options) == 25
 
 
-async def test_manage_reinstall_opens_os_choice_with_banner(
+async def test_manage_reinstall_opens_clean_os_choice_card(
     bot, guild, admin_member, manager, actor
 ):
     instance = await manager.deploy(actor, Specs(1, 1, 1))
@@ -567,8 +569,63 @@ async def test_manage_reinstall_opens_os_choice_with_banner(
     kwargs = interaction.response.send_message.call_args.kwargs
     assert isinstance(kwargs["view"], ReinstallOSView)
     assert kwargs["ephemeral"] is True
-    assert kwargs["file"] is not None
-    assert "Debian 12" in str(kwargs["embed"].to_dict())
+    assert "file" not in kwargs
+    embed_dict = kwargs["embed"].to_dict()
+    assert "image" not in embed_dict
+    assert "Debian 12" in str(embed_dict)
+    assert "> **Status** Awaiting OS Selection" in embed_dict["description"]
+
+
+async def test_console_opens_clean_sshx_embed_and_closes_in_place(
+    bot, guild, admin_member, manager, actor
+):
+    instance = await manager.deploy(actor, Specs(1, 1, 1))
+    view = ManageView(bot, actor, [instance], instance.id)
+    interaction = make_interaction(admin_member, actor.guild_id)
+    await view.sshx.callback(interaction)
+    sent = interaction.followup.send.call_args.kwargs
+    sshx_view = sent["view"]
+    assert isinstance(sshx_view, SSHXView)
+    assert sent["ephemeral"] is True
+    embed_dict = sent["embed"].to_dict()
+    assert embed_dict["title"].startswith("Root Console — VMID")
+    assert "> **Status** Active · Private Root Shell" in embed_dict["description"]
+    assert "sshx.io/s/" not in str(embed_dict)
+    assert all(getattr(c, "emoji", None) is None for c in sshx_view.children)
+
+    close_interaction = make_interaction(admin_member, actor.guild_id)
+    await sshx_view.close_session.callback(close_interaction)
+    closed_embed = close_interaction.edit_original_response.call_args.kwargs["embed"].to_dict()
+    assert "Closed · Link Revoked" in closed_embed["description"]
+    close_interaction.followup.send.assert_not_awaited()
+
+
+async def test_status_command_admin_only_and_refreshes_in_place(
+    bot, guild, admin_member, manager, actor, monkeypatch
+):
+    monkeypatch.setattr("noir.manager._sample_host_cpu_percent", lambda: 14.5)
+    await manager.deploy(actor, Specs(2, 2, 5))
+
+    non_admin = make_member(TARGET_ID, guild, admin=False)
+    with pytest.raises(UserError, match="Only server administrators"):
+        await invoke(bot, guild, non_admin, "status")
+
+    ctx = await invoke(bot, guild, admin_member, "status")
+    kwargs = ctx.send.call_args.kwargs
+    assert "file" not in kwargs
+    status_view = kwargs["view"]
+    assert isinstance(status_view, HostStatusView)
+    embed_dict = kwargs["embed"].to_dict()
+    assert embed_dict["title"].startswith("Host Node —")
+    assert "> **Fleet** 1 Running • 0 Stopped • 1 / 20 Total VPS" in embed_dict["description"]
+    assert "> **Allocated to VPSes** 2GB RAM • 2 vCPU • 5GB Disk" in embed_dict["description"]
+    assert "14.5%" in embed_dict["description"]
+
+    press = make_interaction(admin_member, actor.guild_id)
+    assert await status_view.interaction_check(press)
+    await status_view.refresh.callback(press)
+    status_view.message.edit.assert_awaited_once()
+    press.followup.send.assert_not_awaited()
 
 
 async def test_deploy_failure_keeps_os_and_owner_context(
