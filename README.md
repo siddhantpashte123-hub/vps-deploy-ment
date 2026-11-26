@@ -74,12 +74,13 @@ The management panel has:
 
 | Button | Behavior |
 |---|---|
-| **Start** | Start the existing container; files are preserved. |
-| **Stop** | Stop processes; the home disk is preserved. |
+| **Start** | Start the existing container and refresh live metrics in-place; files are preserved. |
+| **Stop** | Stop processes and update the card in-place; the home disk is preserved. |
+| **Console** | Open a real browser terminal through `sshx.io` as **root inside the VPS container**; the capability link is sent only to you as an ephemeral Discord response. |
+| **Stats** | Refresh live container uptime, CPU %, RAM MB, and `/home/noir` disk usage in-place. |
 | **Reinstall** | Choose the replacement OS (Ubuntu 24.04 / Debian 12), confirm, then **erase all files** and recreate a fresh root container with the same ID/resources/owner. |
-| **SSHX** | Open a real browser terminal through `sshx.io` as **root inside the VPS container**; the capability link is sent only to you as an ephemeral Discord response. |
+| **Refresh** | Reconcile the panel with Docker and live telemetry. |
 | **Delete** | Confirm first, then remove the container and its disk permanently. |
-| **Refresh** | Reconcile the panel with Docker and the inventory. |
 | **Open in DM** | Send a live personal control console straight to your bot DMs. |
 
 Other commands (work in the locked server **and in bot DMs** for members/admins of that server):

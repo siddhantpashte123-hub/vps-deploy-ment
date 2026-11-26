@@ -7,31 +7,31 @@ from pathlib import Path
 import discord
 
 from .errors import NoirError, UserError
-from .models import Actor, Instance, Specs
+from .models import Actor, Instance, LiveStats, Specs
 from .os_catalog import DEFAULT_OS, OS_CHOICES, os_choice, os_label
 
 log = logging.getLogger(__name__)
 
-# NOIR dark-slate & blurple palette (native dark cards with crisp left accent bars)
+# NOIR dark-slate palette (clean left accent bar, gold/amber when stopped, green when online)
 COLOR = 0x5865F2
 ACCENT = 0x38BDF8
 SUCCESS = 0x22C55E
-WARNING = 0xF59E0B
+WARNING = 0xFACC15
 DANGER = 0xEF4444
 MUTED = 0x64748B
-STATUS_PILL = {
-    "running": ("🟢", "ONLINE"),
-    "stopped": ("⚪", "STOPPED"),
-    "error": ("🔴", "ERROR"),
-    "provisioning": ("🟡", "PROVISIONING"),
-    "reinstalling": ("🟡", "REINSTALLING"),
-    "deleting": ("🔴", "DELETING"),
+STATUS_TEXT = {
+    "running": "Running · Online",
+    "stopped": "Stopped · Offline",
+    "error": "Error · Needs Attention",
+    "provisioning": "Provisioning · Booting",
+    "reinstalling": "Reinstalling · Wiping Disk",
+    "deleting": "Deleting · Removing",
 }
 STATUS_COLOR = {
     "running": SUCCESS,
-    "stopped": MUTED,
+    "stopped": WARNING,
     "error": DANGER,
-    "provisioning": WARNING,
+    "provisioning": ACCENT,
     "reinstalling": WARNING,
     "deleting": DANGER,
 }
@@ -81,52 +81,90 @@ def _timestamp(value: str) -> float:
         return 0
 
 
-def instance_embed(instance: Instance) -> discord.Embed:
-    dot, label = STATUS_PILL.get(instance.status, ("🟡", instance.status.upper()))
+def _format_uptime(seconds: int, online: bool) -> str:
+    if not online:
+        return "Offline"
+    seconds = max(0, int(seconds))
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}d {hours}h {minutes}m"
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{max(1, secs)}s"
+
+
+def _vmid_short(instance_id: str) -> str:
+    tail = instance_id.split("-", 1)[-1]
+    return tail[:6].upper()
+
+
+def instance_embed(
+    instance: Instance,
+    stats: LiveStats | None = None,
+    *,
+    index: int = 1,
+) -> discord.Embed:
     color = STATUS_COLOR.get(instance.status, COLOR)
-    ts = int(_timestamp(instance.updated_at))
-    embed = discord.Embed(
-        title="Server VPS Console",
-        description=(
-            f"**Status**\n`{dot} {label}`\n\n"
-            "Isolated **Root terminal** container with persistent home storage. "
-            "Control this VPS here or directly in **bot DMs** with `!manage`."
-        ),
-        color=color,
-    )
-    embed.set_author(name="NOIR Cloud")
-    embed.add_field(
-        name="Resources",
-        value=(
-            f"RAM: **{instance.ram_gb} GiB**\n"
-            f"CPU: **{instance.cpu} vCPU**\n"
-            f"Disk: **{instance.disk_gb} GiB**"
-        ),
-        inline=True,
-    )
-    embed.add_field(
-        name="Environment",
-        value=(
-            f"OS: **{os_label(instance.os)}**\nOwner: <@{instance.owner_id}>\nUpdated: <t:{ts}:R>"
-        ),
-        inline=True,
-    )
-    embed.add_field(
-        name="Root Terminal",
-        value=(
-            "Click **SSHX** below to open a private **root** browser terminal. "
-            "No public SSH port is exposed."
-        ),
-        inline=False,
-    )
-    embed.set_footer(
-        text=(
-            f"vID: {instance.id} • Managed Via NOIR • "
-            "Start/Stop preserve files • Reinstall/Delete erase files"
+    status_line = STATUS_TEXT.get(instance.status, instance.status.capitalize())
+    online = instance.status == "running" and (stats.online if stats is not None else True)
+
+    ram_total_mb = instance.ram_gb * 1024
+    disk_total_gb = float(instance.disk_gb)
+    if online and stats is not None:
+        uptime_text = _format_uptime(stats.uptime_seconds, True)
+        cpu_pct = min(999.9, max(0.0, stats.cpu_percent))
+        ram_used_mb = min(ram_total_mb, max(0, round(stats.ram_used_bytes / (1024**2))))
+        ram_pct = (ram_used_mb / ram_total_mb * 100.0) if ram_total_mb else 0.0
+        disk_used_gb = min(disk_total_gb, max(0.0, stats.disk_used_bytes / (1024**3)))
+        disk_pct = (disk_used_gb / disk_total_gb * 100.0) if disk_total_gb else 0.0
+    elif online:
+        uptime_text = "Online"
+        cpu_pct = 0.0
+        ram_used_mb = 0
+        ram_pct = 0.0
+        disk_used_gb = 0.0
+        disk_pct = 0.0
+    else:
+        uptime_text = "Offline"
+        cpu_pct = 0.0
+        ram_used_mb = 0
+        ram_pct = 0.0
+        disk_used_gb = 0.0
+        disk_pct = 0.0
+
+    cores_word = "Core" if instance.cpu == 1 else "Cores"
+    access_line = (
+        "**Root terminal** — click **Console** to open a private SSHX root shell"
+        if instance.status == "running"
+        else (
+            "**Stopped** — click **Start** to boot this VPS (files are preserved)"
+            if instance.status == "stopped"
+            else "**Attention** — click **Refresh** or **Reinstall** to recover this VPS"
         )
     )
-    if BANNER_PATH.is_file():
-        embed.set_image(url=f"attachment://{BANNER_FILENAME}")
+    description = (
+        f"`{instance.id}-{instance.owner_id}`\n"
+        f"> **Status** {status_line}\n\n"
+        f"> **RAM** {instance.ram_gb}GB • **CPU** {instance.cpu} {cores_word} • "
+        f"**Storage** {instance.disk_gb}GB\n"
+        f"> **OS** {instance.os} • **Config** {instance.ram_gb}GB RAM / "
+        f"{instance.cpu} CPU / {instance.disk_gb}GB Disk\n"
+        f"> **Uptime** {uptime_text}\n\n"
+        f"> **CPU** {cpu_pct:.1f}% • **RAM** {ram_used_mb}MB / {ram_total_mb}MB "
+        f"({ram_pct:.1f}%) • **Disk** {disk_used_gb:.1f}GB / {disk_total_gb:.1f}GB "
+        f"({disk_pct:.1f}%)\n"
+        f"> {access_line}"
+    )
+    embed = discord.Embed(
+        title=f"VPS #{max(1, index)} — VMID `{_vmid_short(instance.id)}`",
+        description=description,
+        color=color,
+    )
+    embed.set_footer(text="NOIR Cloud")
     return embed
 
 
@@ -183,7 +221,7 @@ def help_embed(settings) -> discord.Embed:
     embed.add_field(
         name="My VPS & DM Control",
         value=(
-            "`!manage` or `!manage <id>` — Start · Stop · Refresh · SSHX · Reinstall · Delete\n"
+            "`!manage` or `!manage <id>` — Start · Stop · Console · Stats · Reinstall · Refresh\n"
             "`!panel` — Post an interactive **My VPS / Control in DM** hub card\n"
             "💬 **In bot DMs:** send `!manage`, `!delete <id>`, "
             "`!deploy 1 1 1 <@USER_ID>`, or `!help`"
@@ -344,42 +382,47 @@ class PanelHubView(discord.ui.View):
         super().__init__(timeout=None)
         self.bot = bot
 
-    @discord.ui.button(label="My VPS", emoji="🖥️", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="My VPS", style=discord.ButtonStyle.primary)
     async def my_vps(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
             instances = await self.bot.manager.list(actor)
+            stats = await self.bot.manager.stats(actor, instances[0].id) if instances else None
         except Exception as exc:
             await interaction.response.send_message(error_text(exc), ephemeral=True)
             return
         selected = instances[0].id if instances else None
         view = ManageView(self.bot, actor, instances, selected, in_dm=False)
         await interaction.response.send_message(
-            embed=instance_embed(instances[0]) if instances else empty_embed(),
+            embed=instance_embed(instances[0], stats, index=1) if instances else empty_embed(),
             view=view,
             ephemeral=True,
         )
         view.message = await interaction.original_response()
 
-    @discord.ui.button(label="Control in DM", emoji="✉️", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Control in DM", style=discord.ButtonStyle.secondary)
     async def open_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
             instances = await self.bot.manager.list(actor)
             selected = instances[0].id if instances else None
+            stats = await self.bot.manager.stats(actor, instances[0].id) if instances else None
             view = ManageView(self.bot, actor, instances, selected, in_dm=True)
             dm = await interaction.user.create_dm()
-            kwargs = {
-                "embed": instance_embed(instances[0]) if instances else empty_embed(),
+            kwargs: dict = {
+                "embed": (
+                    instance_embed(instances[0], stats, index=1) if instances else empty_embed()
+                ),
                 "view": view,
             }
-            banner = banner_file()
-            if banner is not None:
-                kwargs["file"] = banner
+            if not instances:
+                banner = banner_file()
+                if banner is not None:
+                    kwargs["file"] = banner
             view.message = await dm.send(**kwargs)
             await interaction.followup.send(
-                "✉️ Sent your **NOIR** control console to your DMs. "
+                "Sent your **NOIR** control console to your DMs. "
                 "You can also type `!manage` there anytime.",
                 ephemeral=True,
             )
@@ -471,10 +514,12 @@ class DeployOSView(discord.ui.View):
             )
             return
         in_dm = interaction.guild_id is None
+        stats = await self.bot.manager.stats(self.actor, instance.id)
         view = ManageView(self.bot, self.actor, [instance], instance.id, in_dm=in_dm)
         await message.edit(
             content=f"✅ VPS deployed for <@{self.owner_id}> · `{instance.id}`",
-            embed=instance_embed(instance),
+            embed=instance_embed(instance, stats, index=1),
+            attachments=[],
             view=view,
         )
         view.message = message
@@ -796,13 +841,12 @@ class ManageView(discord.ui.View):
         if len(instances) > 1:
             options = [
                 discord.SelectOption(
-                    label=i.id,
+                    label=f"VPS #{idx} — {i.id}",
                     description=f"{os_label(i.os)} · {i.specs.label()} · {i.status}"[:100],
                     value=i.id,
                     default=i.id == self.selected,
-                    emoji="🖥️",
                 )
-                for i in instances[:25]
+                for idx, i in enumerate(instances[:25], start=1)
             ]
             select = discord.ui.Select(placeholder="Switch VPS instance…", options=options, row=0)
             select.callback = self._select  # type: ignore[method-assign]
@@ -816,6 +860,15 @@ class ManageView(discord.ui.View):
 
     def current(self) -> Instance | None:
         return next((i for i in self.instances if i.id == self.selected), None)
+
+    def current_index(self) -> int:
+        for idx, item in enumerate(self.instances, start=1):
+            if item.id == self.selected:
+                return idx
+        return 1
+
+    def _replace_instance(self, updated: Instance) -> None:
+        self.instances = [updated if i.id == updated.id else i for i in self.instances]
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         try:
@@ -836,93 +889,64 @@ class ManageView(discord.ui.View):
         if values:
             self.selected = values[0]
         instance = await self.manager.get(self.actor, self.selected)
-        await interaction.response.edit_message(embed=instance_embed(instance), view=self)
+        self._replace_instance(instance)
+        stats = await self.manager.stats(self.actor, instance.id)
+        await interaction.response.edit_message(
+            embed=instance_embed(instance, stats, index=self.current_index()),
+            attachments=[],
+            view=self,
+        )
 
     @property
     def manager(self):
         return self.bot.manager
 
+    async def _edit_panel(
+        self, interaction: discord.Interaction, embed: discord.Embed, view: discord.ui.View
+    ) -> None:
+        target = self.message or interaction.message
+        if target is not None:
+            try:
+                await target.edit(embed=embed, attachments=[], view=view)
+                return
+            except discord.HTTPException:
+                pass
+        try:
+            await interaction.edit_original_response(embed=embed, attachments=[], view=view)
+        except discord.HTTPException:
+            pass
+
     async def _power(self, interaction: discord.Interaction, action: str) -> None:
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.defer()
         try:
             instance = await getattr(self.manager, action)(self.actor, self.selected)
-            await interaction.followup.send(
-                f"`{instance.id}` is now **{instance.status.upper()}**.", ephemeral=True
+            self._replace_instance(instance)
+            stats = await self.manager.stats(self.actor, instance.id)
+            await self._edit_panel(
+                interaction,
+                instance_embed(instance, stats, index=self.current_index()),
+                self,
             )
-            if self.message:
-                await self.message.edit(embed=instance_embed(instance), view=self)
         except Exception as exc:
             log.exception("Manage action %s failed", action)
             await interaction.followup.send(error_text(exc), ephemeral=True)
 
-    @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Start", style=discord.ButtonStyle.success, row=1)
     async def start(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._power(interaction, "start")
 
-    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.secondary, row=1)
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._power(interaction, "stop")
 
-    @discord.ui.button(label="Refresh", emoji="🔃", style=discord.ButtonStyle.secondary, row=1)
-    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            self.instances = await self.manager.list(self.actor)
-            if self.selected not in {i.id for i in self.instances}:
-                self.selected = self.instances[0].id if self.instances else None
-            instance = (
-                await self.manager.refresh(self.actor, self.selected) if self.selected else None
-            )
-            replacement = ManageView(
-                self.bot, self.actor, self.instances, self.selected, in_dm=self.in_dm
-            )
-            embed = instance_embed(instance) if instance else empty_embed()
-            if self.message:
-                replacement.message = self.message
-                await self.message.edit(embed=embed, view=replacement)
-            self.stop()
-            await interaction.followup.send("Panel refreshed.", ephemeral=True)
-        except Exception as exc:
-            await interaction.followup.send(error_text(exc), ephemeral=True)
-
-    @discord.ui.button(label="Open in DM", emoji="✉️", style=discord.ButtonStyle.secondary, row=1)
-    async def send_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            instances = await self.manager.list(self.actor)
-            selected = self.selected if any(i.id == self.selected for i in instances) else None
-            if selected is None and instances:
-                selected = instances[0].id
-            current = next((i for i in instances if i.id == selected), None)
-            dm_view = ManageView(self.bot, self.actor, instances, selected, in_dm=True)
-            dm = await interaction.user.create_dm()
-            kwargs = {
-                "embed": instance_embed(current) if current else empty_embed(),
-                "view": dm_view,
-            }
-            banner = banner_file()
-            if banner is not None:
-                kwargs["file"] = banner
-            dm_view.message = await dm.send(**kwargs)
-            await interaction.followup.send(
-                "✉️ Sent your **NOIR** VPS console to your DMs.", ephemeral=True
-            )
-        except discord.Forbidden:
-            await interaction.followup.send(
-                "Could not send you a DM. Enable DMs from server members in your privacy settings.",
-                ephemeral=True,
-            )
-        except Exception as exc:
-            await interaction.followup.send(error_text(exc), ephemeral=True)
-
-    @discord.ui.button(label="SSHX", emoji="💻", style=discord.ButtonStyle.primary, row=2)
+    @discord.ui.button(label="Console", style=discord.ButtonStyle.primary, row=1)
     async def sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
             instance, url = await self.manager.sshx(self.actor, self.selected)
             view = SSHXView(self.manager, self.actor, instance.id, url)
             view.message = await interaction.followup.send(
-                f"🔐 **Private root terminal for `{instance.id}`**\n"
+                f"🔐 **Private root console for `{instance.id}`**\n"
                 "Anyone with this link gets **root access inside this VPS**. Do not share it. "
                 "The session stays active until you close it or stop/reinstall/delete the VPS. "
                 "Hiding this message or waiting for this panel to expire does not revoke the link.",
@@ -934,7 +958,22 @@ class ManageView(discord.ui.View):
             log.exception("SSHX failed")
             await interaction.followup.send(error_text(exc), ephemeral=True)
 
-    @discord.ui.button(label="Reinstall", emoji="♻️", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Stats", style=discord.ButtonStyle.secondary, row=1)
+    async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            instance = await self.manager.refresh(self.actor, self.selected)
+            self._replace_instance(instance)
+            live = await self.manager.stats(self.actor, instance.id)
+            await self._edit_panel(
+                interaction,
+                instance_embed(instance, live, index=self.current_index()),
+                self,
+            )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="Reinstall", style=discord.ButtonStyle.danger, row=2)
     async def reinstall(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             instance = await self.manager.get(self.actor, self.selected)
@@ -950,7 +989,36 @@ class ManageView(discord.ui.View):
         )
         view.message = await interaction.original_response()
 
-    @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, row=2)
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=2)
+    async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            self.instances = await self.manager.list(self.actor)
+            if self.selected not in {i.id for i in self.instances}:
+                self.selected = self.instances[0].id if self.instances else None
+            instance = (
+                await self.manager.refresh(self.actor, self.selected) if self.selected else None
+            )
+            if instance is not None:
+                self._replace_instance(instance)
+            live = (
+                await self.manager.stats(self.actor, instance.id) if instance is not None else None
+            )
+            replacement = ManageView(
+                self.bot, self.actor, self.instances, self.selected, in_dm=self.in_dm
+            )
+            embed = (
+                instance_embed(instance, live, index=replacement.current_index())
+                if instance
+                else empty_embed()
+            )
+            replacement.message = self.message or interaction.message
+            await self._edit_panel(interaction, embed, replacement)
+            self.stop()
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=2)
     async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
             instance = await self.manager.get(self.actor, self.selected)
@@ -965,6 +1033,42 @@ class ManageView(discord.ui.View):
             ephemeral=True,
         )
         view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Open in DM", style=discord.ButtonStyle.secondary, row=2)
+    async def send_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            instances = await self.manager.list(self.actor)
+            selected = self.selected if any(i.id == self.selected for i in instances) else None
+            if selected is None and instances:
+                selected = instances[0].id
+            current = next((i for i in instances if i.id == selected), None)
+            dm_view = ManageView(self.bot, self.actor, instances, selected, in_dm=True)
+            live = await self.manager.stats(self.actor, current.id) if current else None
+            dm = await interaction.user.create_dm()
+            kwargs: dict = {
+                "embed": (
+                    instance_embed(current, live, index=dm_view.current_index())
+                    if current
+                    else empty_embed()
+                ),
+                "view": dm_view,
+            }
+            if current is None:
+                banner = banner_file()
+                if banner is not None:
+                    kwargs["file"] = banner
+            dm_view.message = await dm.send(**kwargs)
+            await interaction.followup.send(
+                "Sent your **NOIR** VPS console to your DMs.", ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Could not send you a DM. Enable DMs from server members in your privacy settings.",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
 
     async def on_timeout(self) -> None:
         for child in self.children:

@@ -109,6 +109,7 @@ def make_interaction(member, guild_id, *, values=None):
             defer=AsyncMock(),
         ),
         followup=SimpleNamespace(send=AsyncMock()),
+        edit_original_response=AsyncMock(),
         original_response=AsyncMock(return_value=message),
     )
 
@@ -298,12 +299,29 @@ async def test_dm_control_for_owner_and_admin(
     assert isinstance(view, ManageView)
     assert view.in_dm is True
     assert view.selected == instance.id
+    assert "file" not in ctx.send.call_args.kwargs
     assert not any(getattr(c, "label", "") == "Open in DM" for c in view.children)
-    # Power control works from a DM interaction (guild_id=None).
+    # Power & Stats controls update the card silently in-place without spam followups.
     dm_interaction = make_interaction(owner_user, None)
     assert await view.interaction_check(dm_interaction)
     await view.stop.callback(dm_interaction)
     assert backend.items[instance.id]["status"] == "stopped"
+    dm_interaction.followup.send.assert_not_awaited()
+    stopped_embed = view.message.edit.call_args.kwargs["embed"]
+    assert "Stopped · Offline" in stopped_embed.description
+    assert "Uptime** Offline" in stopped_embed.description
+
+    start_interaction = make_interaction(owner_user, None)
+    await view.start.callback(start_interaction)
+    assert backend.items[instance.id]["status"] == "running"
+    start_interaction.followup.send.assert_not_awaited()
+    running_embed = view.message.edit.call_args.kwargs["embed"]
+    assert "Running · Online" in running_embed.description
+    assert "RAM** 128MB / 1024MB" in running_embed.description
+
+    stats_interaction = make_interaction(owner_user, None)
+    await view.stats.callback(stats_interaction)
+    stats_interaction.followup.send.assert_not_awaited()
 
     # Admin can deploy for a server member from DMs.
     admin_user = Mock(spec=discord.User)

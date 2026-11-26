@@ -10,7 +10,7 @@ from typing import Protocol
 
 from .config import Settings
 from .errors import AccessDenied, BackendError, UserError
-from .models import Actor, Instance, Specs, utc_now, valid_id
+from .models import Actor, Instance, LiveStats, Specs, utc_now, valid_id
 from .os_catalog import DEFAULT_OS, os_choice
 from .store import Store
 
@@ -269,6 +269,19 @@ class Manager:
                 return instance
             status = await asyncio.to_thread(self.backend.status, instance_id)
             return await asyncio.to_thread(self.store.update, instance_id, status=status)
+
+    async def stats(self, actor: Actor, instance_id: str) -> LiveStats:
+        instance = await self.get(actor, instance_id)
+        if instance.status != "running":
+            return LiveStats(online=False)
+        fn = getattr(self.backend, "stats", None)
+        if fn is None:
+            return LiveStats(online=True)
+        try:
+            return await asyncio.to_thread(fn, instance_id)
+        except Exception:
+            log.debug("Stats collection failed for %s", instance_id, exc_info=True)
+            return LiveStats(online=instance.status == "running")
 
     async def upgrade_runtime(self) -> list[tuple[str, bool]]:
         """Replace containers with the current root runtime; preserve home disks/files."""

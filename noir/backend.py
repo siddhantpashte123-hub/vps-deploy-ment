@@ -15,7 +15,7 @@ from docker.types import LogConfig, Mount, Ulimit
 
 from .config import Settings
 from .errors import BackendError, UserError
-from .models import Specs, valid_id
+from .models import LiveStats, Specs, valid_id
 from .os_catalog import DEFAULT_OS, os_label
 
 log = logging.getLogger(__name__)
@@ -70,6 +70,40 @@ def parse_sshx_url(raw: str) -> str | None:
 def _report(progress: Progress | None, stage: str, percent: int) -> None:
     if progress is not None:
         progress(stage, percent)
+
+
+def _parse_uptime(started_at: Any) -> int:
+    from datetime import datetime, timezone
+
+    if not isinstance(started_at, str) or started_at.startswith("0001-"):
+        return 0
+    cleaned = started_at.strip()
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    # Docker emits up to 9 fractional digits; Python 3.10 handles 6 reliably.
+    cleaned = re.sub(r"\.(\d{6})\d+", r".\1", cleaned)
+    try:
+        started = datetime.fromisoformat(cleaned)
+    except ValueError:
+        return 0
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    return max(0, int((datetime.now(timezone.utc) - started).total_seconds()))
+
+
+def _cpu_percent(raw: dict[str, Any]) -> float:
+    cpu = raw.get("cpu_stats") or {}
+    pre = raw.get("precpu_stats") or {}
+    cpu_delta = int((cpu.get("cpu_usage") or {}).get("total_usage") or 0) - int(
+        (pre.get("cpu_usage") or {}).get("total_usage") or 0
+    )
+    sys_delta = int(cpu.get("system_cpu_usage") or 0) - int(pre.get("system_cpu_usage") or 0)
+    online = int(
+        cpu.get("online_cpus") or len((cpu.get("cpu_usage") or {}).get("percpu_usage") or []) or 1
+    )
+    if cpu_delta <= 0 or sys_delta <= 0:
+        return 0.0
+    return max(0.0, (cpu_delta / sys_delta) * online * 100.0)
 
 
 class DockerBackend:
@@ -300,6 +334,42 @@ class DockerBackend:
         if state.get("Status") in {"exited", "created"}:
             return "stopped"
         return "error"
+
+    def stats(self, instance_id: str) -> LiveStats:
+        container = self.get(instance_id)
+        if container is None:
+            return LiveStats(online=False)
+        state = container.attrs.get("State", {})
+        if not state.get("Running"):
+            return LiveStats(online=False)
+        uptime_seconds = _parse_uptime(state.get("StartedAt"))
+        cpu_percent = 0.0
+        ram_used_bytes = 0
+        try:
+            raw = container.stats(stream=False)
+            if isinstance(raw, dict):
+                cpu_percent = _cpu_percent(raw)
+                mem = raw.get("memory_stats") or {}
+                cache = int((mem.get("stats") or {}).get("inactive_file") or 0)
+                ram_used_bytes = max(0, int(mem.get("usage") or 0) - cache)
+        except Exception:
+            log.debug("Could not read Docker stats for %s", instance_id, exc_info=True)
+        disk_used_bytes = 0
+        try:
+            code, out = self._exec(instance_id, ["df", "-B1", "--output=used", VPS_HOME])
+            if code == 0:
+                lines = [ln.strip() for ln in out.splitlines() if ln.strip().isdigit()]
+                if lines:
+                    disk_used_bytes = max(0, int(lines[-1]))
+        except Exception:
+            log.debug("Could not read disk usage for %s", instance_id, exc_info=True)
+        return LiveStats(
+            online=True,
+            uptime_seconds=uptime_seconds,
+            cpu_percent=cpu_percent,
+            ram_used_bytes=ram_used_bytes,
+            disk_used_bytes=disk_used_bytes,
+        )
 
     def start(self, instance_id: str) -> None:
         container = self.get(instance_id)

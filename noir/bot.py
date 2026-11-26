@@ -249,14 +249,23 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         elif instances:
             selected = instances[0].id
         instance = next((i for i in instances if i.id == selected), None)
+        stats = await manager.stats(actor, instance.id) if instance is not None else None
         view = ManageView(bot, actor, instances, selected, in_dm=in_dm)
-        message = await ctx.send(
-            embed=instance_embed(instance) if instance else empty_embed(),
-            file=banner_file(),
-            view=view,
-            reference=ctx.message,
-            mention_author=False,
-        )
+        send_kwargs: dict = {
+            "embed": (
+                instance_embed(instance, stats, index=view.current_index())
+                if instance
+                else empty_embed()
+            ),
+            "view": view,
+            "reference": ctx.message,
+            "mention_author": False,
+        }
+        if instance is None:
+            banner = banner_file()
+            if banner is not None:
+                send_kwargs["file"] = banner
+        message = await ctx.send(**send_kwargs)
         view.message = message
         if len(instances) > 25:
             await ctx.send(
@@ -273,14 +282,21 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         if ctx.guild is None:
             instances = await manager.list(actor)
             selected = instances[0].id if instances else None
+            stats = await manager.stats(actor, instances[0].id) if instances else None
             view = ManageView(bot, actor, instances, selected, in_dm=True)
-            message = await ctx.send(
-                embed=instance_embed(instances[0]) if instances else empty_embed(),
-                file=banner_file(),
-                view=view,
-                reference=ctx.message,
-                mention_author=False,
-            )
+            send_kwargs: dict = {
+                "embed": (
+                    instance_embed(instances[0], stats, index=1) if instances else empty_embed()
+                ),
+                "view": view,
+                "reference": ctx.message,
+                "mention_author": False,
+            }
+            if not instances:
+                banner = banner_file()
+                if banner is not None:
+                    send_kwargs["file"] = banner
+            message = await ctx.send(**send_kwargs)
             view.message = message
             return
         if not actor.is_admin:
@@ -308,14 +324,21 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
         if first is None:
             instances = await manager.list(actor)
+            stats = await manager.stats(actor, instances[0].id) if instances else None
             view = ManageView(bot, actor, instances, in_dm=in_dm)
-            message = await ctx.send(
-                embed=instance_embed(instances[0]) if instances else empty_embed(),
-                file=banner_file(),
-                view=view,
-                reference=ctx.message,
-                mention_author=False,
-            )
+            send_kwargs: dict = {
+                "embed": (
+                    instance_embed(instances[0], stats, index=1) if instances else empty_embed()
+                ),
+                "view": view,
+                "reference": ctx.message,
+                "mention_author": False,
+            }
+            if not instances:
+                banner = banner_file()
+                if banner is not None:
+                    send_kwargs["file"] = banner
+            message = await ctx.send(**send_kwargs)
             view.message = message
             return
         target_id = mention_id(first)

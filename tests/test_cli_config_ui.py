@@ -181,7 +181,8 @@ def test_management_buttons_present():
     bot = Mock()
     view = ManageView(bot, Actor(2, 1), [sample_instance()])
     labels = {child.label for child in view.children}
-    assert {"Start", "Stop", "Reinstall", "SSHX", "Delete", "Refresh"} <= labels
+    assert {"Start", "Stop", "Console", "Stats", "Reinstall", "Refresh", "Delete"} <= labels
+    assert all(child.emoji is None for child in view.children if hasattr(child, "emoji"))
     confirm = ConfirmView(Mock(), Actor(2, 1), sample_instance(), "delete")
     assert confirm.confirm.label == "Delete permanently"
 
@@ -208,7 +209,23 @@ def test_deploy_progress_meter_shows_percent_and_phases():
 
 
 def test_premium_instance_embed_advertises_root_without_credentials():
-    embed = instance_embed(sample_instance())
-    text = str(embed.to_dict())
+    from noir.models import LiveStats
+
+    stats = LiveStats(
+        online=True,
+        uptime_seconds=3725,
+        cpu_percent=12.5,
+        ram_used_bytes=256 * 1024**2,
+        disk_used_bytes=512 * 1024**2,
+    )
+    embed = instance_embed(sample_instance(), stats, index=1)
+    data = embed.to_dict()
+    text = str(data)
+    assert "VPS #1 — VMID `A1B2C3`" == data["title"]
+    assert "`noir-a1b2c3d4e5f6-2`" in data["description"]
+    assert "> **Status** Running · Online" in data["description"]
+    assert "> **Uptime** 1h 2m" in data["description"]
+    assert "> **CPU** 12.5% • **RAM** 256MB / 1024MB (25.0%)" in data["description"]
     assert "Root terminal" in text
+    assert "image" not in data
     assert "sshx.io/s/" not in text
