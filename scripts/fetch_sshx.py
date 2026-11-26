@@ -2,7 +2,7 @@
 """Download the official static SSHX client without curl|sh; record its SHA-256.
 
 Upstream publishes a rolling artifact, not versioned release assets. Set
-FIER_SSHX_SHA256 to the SHA-256 of the *binary* you have reviewed to pin
+NOIR_SSHX_SHA256 to the SHA-256 of the *binary* you have reviewed to pin
 subsequent installations.
 """
 
@@ -81,9 +81,9 @@ def main() -> None:
     arch = {"x86_64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}.get(platform.machine())
     if arch is None:
         raise SystemExit("SSHX auto-install supports Linux x86_64 and aarch64 only.")
-    expected = os.getenv("FIER_SSHX_SHA256", "").strip().lower()
+    expected = os.getenv("NOIR_SSHX_SHA256", "").strip().lower()
     if expected and (len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected)):
-        raise SystemExit("FIER_SSHX_SHA256 must be a 64-character hex digest.")
+        raise SystemExit("NOIR_SSHX_SHA256 must be a 64-character hex digest.")
     if args.output.is_file() and not expected:
         print("Using existing SSHX binary; see runtime/sshx.sha256.")
         return
@@ -94,7 +94,7 @@ def main() -> None:
             return
     url = BASE_URL.format(arch=arch)
     print(f"Downloading official SSHX client for {arch}…")
-    request = urllib.request.Request(url, headers={"User-Agent": "FIER-installer/1.0"})
+    request = urllib.request.Request(url, headers={"User-Agent": "NOIR-installer/1.0"})
     with urllib.request.urlopen(request, timeout=90) as response:
         data = response.read(MAX_DOWNLOAD + 1)
     if len(data) > MAX_DOWNLOAD:

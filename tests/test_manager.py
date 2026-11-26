@@ -2,9 +2,9 @@ import asyncio
 
 import pytest
 
-from fier.errors import AccessDenied, BackendError, UserError
-from fier.models import Actor, Specs
-from fier.store import Store
+from noir.errors import AccessDenied, BackendError, UserError
+from noir.models import Actor, Specs
+from noir.store import Store
 
 
 async def test_deploy_start_stop_persist(manager, backend, actor, tmp_path):

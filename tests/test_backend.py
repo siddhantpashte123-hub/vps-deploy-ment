@@ -3,9 +3,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from fier.backend import DockerBackend, parse_sshx_url
-from fier.errors import BackendError
-from fier.models import Specs
+from noir.backend import DockerBackend, parse_sshx_url
+from noir.errors import BackendError
+from noir.models import Specs
 
 
 @pytest.mark.parametrize(
@@ -45,9 +45,9 @@ def test_container_root_runtime_and_real_limits(settings):
     client.containers.run.return_value = container
     backend = DockerBackend(settings, client)
     with patch.object(backend, "_helper") as helper:
-        result = backend.create("fier-a1b2c3d4e5f6", Specs(2, 3, 4), 123, 456)
+        result = backend.create("noir-a1b2c3d4e5f6", Specs(2, 3, 4), 123, 456)
     assert result == "container-id"
-    helper.assert_called_once_with("create", "fier-a1b2c3d4e5f6", 4)
+    helper.assert_called_once_with("create", "noir-a1b2c3d4e5f6", 4)
     kwargs = client.containers.run.call_args.kwargs
     assert kwargs["mem_limit"] == 2 * 1024**3
     assert kwargs["memswap_limit"] == 2 * 1024**3
@@ -60,8 +60,8 @@ def test_container_root_runtime_and_real_limits(settings):
     assert kwargs["read_only"] is False and kwargs["privileged"] is False
     assert kwargs["user"] == "0:0"
     assert kwargs["environment"]["USER"] == "root"
-    assert kwargs["labels"]["fier.runtime"] == "root-v2"
-    assert "ports" not in kwargs and kwargs["mounts"][0]["Target"] == "/home/fier"
+    assert kwargs["labels"]["noir.runtime"] == "root-v2"
+    assert "ports" not in kwargs and kwargs["mounts"][0]["Target"] == "/home/noir"
     assert "DISCORD_TOKEN" not in kwargs["environment"]
     assert kwargs["log_config"].type == "json-file"
 
@@ -76,7 +76,7 @@ def test_create_reports_real_progress(settings):
     events = []
     with patch.object(backend, "_helper"):
         backend.create(
-            "fier-a1b2c3d4e5f6", Specs(1, 1, 1), 1, 2, lambda s, p: events.append((s, p))
+            "noir-a1b2c3d4e5f6", Specs(1, 1, 1), 1, 2, lambda s, p: events.append((s, p))
         )
     assert [p for _, p in events] == sorted(p for _, p in events)
     assert events[-1] == ("ready", 95)
@@ -86,18 +86,18 @@ def test_create_reports_real_progress(settings):
 def test_sshx_exec_runs_as_root(settings):
     backend = DockerBackend(settings, Mock())
     with patch.object(backend, "_exec", return_value=(0, "https://sshx.io/s/a#b\n")) as exec_mock:
-        assert backend.sshx("fier-a1b2c3d4e5f6") == "https://sshx.io/s/a#b"
+        assert backend.sshx("noir-a1b2c3d4e5f6") == "https://sshx.io/s/a#b"
     assert exec_mock.call_args_list[0].args[1] == [
-        "/usr/local/bin/fier-sshx",
+        "/usr/local/bin/noir-sshx",
         "start",
-        "fier-a1b2c3d4e5f6",
+        "noir-a1b2c3d4e5f6",
     ]
     with patch.object(backend, "get") as get:
         container = Mock()
         container.status = "running"
         container.exec_run.return_value = SimpleNamespace(exit_code=0, output=b"ok")
         get.return_value = container
-        backend._exec("fier-a1b2c3d4e5f6", ["id"])
+        backend._exec("noir-a1b2c3d4e5f6", ["id"])
     assert container.exec_run.call_args.kwargs["user"] == "0:0"
 
 
@@ -106,20 +106,20 @@ def test_helper_rejects_path_injection(settings):
     with pytest.raises(BackendError):
         backend._helper("delete", "../../etc")
     with pytest.raises(BackendError):
-        backend._helper("create", "fier-a1b2c3d4e5f6", -1)
+        backend._helper("create", "noir-a1b2c3d4e5f6", -1)
 
 
 def test_helper_fixed_argv_no_shell(settings):
     backend = DockerBackend(settings, Mock())
     completed = SimpleNamespace(returncode=0, stdout="ok\n", stderr="")
-    with patch("fier.backend.subprocess.run", return_value=completed) as run:
-        backend._helper("create", "fier-a1b2c3d4e5f6", 1)
+    with patch("noir.backend.subprocess.run", return_value=completed) as run:
+        backend._helper("create", "noir-a1b2c3d4e5f6", 1)
     assert run.call_args.args[0] == [
         "sudo",
         "-n",
         str(settings.volume_helper),
         "create",
-        "fier-a1b2c3d4e5f6",
+        "noir-a1b2c3d4e5f6",
         "1",
     ]
     assert run.call_args.kwargs.get("shell", False) is False
@@ -127,23 +127,23 @@ def test_helper_fixed_argv_no_shell(settings):
 
 def test_refuse_unmanaged_container(settings):
     container = Mock()
-    container.labels = {"io.github.fier.managed": "false"}
+    container.labels = {"io.github.noir.managed": "false"}
     client = Mock()
     client.containers.get.return_value = container
     backend = DockerBackend(settings, client)
     with pytest.raises(BackendError, match="not managed"):
-        backend.get("fier-a1b2c3d4e5f6")
+        backend.get("noir-a1b2c3d4e5f6")
 
 
 def test_preflight_reports_directory_fallback(settings):
     client = Mock()
     network = Mock()
     network.name = settings.network
-    network.attrs = {"Labels": {"io.github.fier.managed": "true"}}
+    network.attrs = {"Labels": {"io.github.noir.managed": "true"}}
     client.networks.list.return_value = [network]
     client.info.return_value = {"ServerVersion": "29.1.3"}
     backend = DockerBackend(settings, client)
     with patch.object(backend, "_helper", side_effect=["ok", "directory"]):
         info = backend.preflight()
-    assert info["fier_storage_mode"] == "directory"
+    assert info["noir_storage_mode"] == "directory"
     assert backend.storage_mode == "directory"

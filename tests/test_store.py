@@ -3,13 +3,13 @@ from dataclasses import replace
 
 import pytest
 
-from fier.models import Instance, utc_now
-from fier.store import Store
+from noir.models import Instance, utc_now
+from noir.store import Store
 
 
 def sample_instance(**changes):
     now = utc_now()
-    instance = Instance("fier-a1b2c3d4e5f6", 1, 2, 1, 1, 1, "container", "running", now, now)
+    instance = Instance("noir-a1b2c3d4e5f6", 1, 2, 1, 1, 1, "container", "running", now, now)
     return replace(instance, **changes)
 
 
@@ -53,7 +53,7 @@ def test_legacy_inventory_migrates_to_ubuntu_without_losing_rows(tmp_path):
         db.execute(
             "INSERT INTO instances VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
-                "fier-a1b2c3d4e5f6",
+                "noir-a1b2c3d4e5f6",
                 "1",
                 "2",
                 1,
@@ -68,7 +68,7 @@ def test_legacy_inventory_migrates_to_ubuntu_without_losing_rows(tmp_path):
     db.close()
     migrated = Store(path)
     try:
-        instance = migrated.get("fier-a1b2c3d4e5f6")
+        instance = migrated.get("noir-a1b2c3d4e5f6")
         assert instance.os == "ubuntu-24.04"
         assert instance.container_id == "old-container"
         assert instance.owner_id == 2
@@ -78,7 +78,7 @@ def test_legacy_inventory_migrates_to_ubuntu_without_losing_rows(tmp_path):
         migrated.close()
     reopened = Store(path)
     try:
-        assert reopened.get("fier-a1b2c3d4e5f6").os == "debian-12"
+        assert reopened.get("noir-a1b2c3d4e5f6").os == "debian-12"
         columns = [row[1] for row in reopened._db.execute("PRAGMA table_info(instances)")]
         assert columns.count("os") == 1
     finally:

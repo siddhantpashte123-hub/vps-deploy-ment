@@ -14,35 +14,35 @@ import urllib.request
 from pathlib import Path
 
 from . import __version__
-from .errors import FierError
+from .errors import NoirError
 
 
 def validate_token(token: str) -> dict:
     if not 40 <= len(token) <= 200 or not re.fullmatch(r"[A-Za-z0-9_.-]+", token):
-        raise FierError(
+        raise NoirError(
             "That does not look like a Discord bot token. Copy it from Bot → Reset Token."
         )
     request = urllib.request.Request(
         "https://discord.com/api/v10/users/@me",
-        headers={"Authorization": f"Bot {token}", "User-Agent": f"FIER/{__version__}"},
+        headers={"Authorization": f"Bot {token}", "User-Agent": f"NOIR/{__version__}"},
     )
     try:
         with urllib.request.urlopen(request, timeout=20) as response:
             data = json.load(response)
     except urllib.error.HTTPError as exc:
         if exc.code in (401, 403):
-            raise FierError(
+            raise NoirError(
                 "Discord rejected the token. Check that you copied a BOT token."
             ) from exc
-        raise FierError(
+        raise NoirError(
             f"Discord token validation returned HTTP {exc.code}. Try again later."
         ) from exc
     except (OSError, ValueError) as exc:
-        raise FierError(
+        raise NoirError(
             "Could not reach Discord to validate the token. Check outbound HTTPS."
         ) from exc
     if not data.get("bot") or not str(data.get("id", "")).isdigit():
-        raise FierError("The response was not a Discord bot account. Use the Bot page token.")
+        raise NoirError("The response was not a Discord bot account. Use the Bot page token.")
     return data
 
 
@@ -82,7 +82,7 @@ def parse_guild_id(raw: str) -> int:
     """Validate the single Discord server (guild) ID entered during setup."""
     value = raw.strip()
     if not value.isdigit() or not 1 <= len(value) <= 25 or int(value) <= 0:
-        raise FierError("Server ID must be a positive Discord numeric ID (digits only).")
+        raise NoirError("Server ID must be a positive Discord numeric ID (digits only).")
     return int(value)
 
 
@@ -94,7 +94,7 @@ def invite_url(client_id: str | int, guild_id: str | int) -> str:
 
 
 def prompt_guild_id(current: str = "") -> str:
-    print("\nFIER — single-server lock")
+    print("\nNOIR — single-server lock")
     print("This bot will stay in ONLY this Discord server and leave any other server.")
     print(
         "Copy the Server ID: Discord User Settings → Advanced → Developer Mode ON, "
@@ -110,14 +110,14 @@ def prompt_guild_id(current: str = "") -> str:
         if not raw and current:
             try:
                 parse_guild_id(current)
-            except FierError:
+            except NoirError:
                 print(f"Existing saved server ID is invalid: {current!r}. Enter a new one.")
                 current = ""
                 continue
             return current
         try:
             parse_guild_id(raw)
-        except FierError as exc:
+        except NoirError as exc:
             print(exc)
             continue
         return raw
@@ -132,7 +132,7 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
 
     values = dotenv_values(env_path)
     current = values.get("DISCORD_TOKEN") or ""
-    current_guild = (values.get("FIER_ALLOWED_GUILD_ID") or "").strip()
+    current_guild = (values.get("NOIR_ALLOWED_GUILD_ID") or "").strip()
     if keep_existing and current:
         token = current
         print("Reusing existing Discord token from the environment file.")
@@ -142,7 +142,7 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
                 "No saved Discord token found (fresh install or empty environment file). "
                 "Falling back to interactive setup."
             )
-        print("\nFIER — Discord bot token")
+        print("\nNOIR — Discord bot token")
         print("Developer Portal → your application → Bot → Reset Token → Copy.")
         print("Also enable MESSAGE CONTENT INTENT on that Bot page.")
         print(
@@ -161,7 +161,7 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
     if current_guild:
         try:
             parse_guild_id(current_guild)
-        except FierError:
+        except NoirError:
             current_guild = ""
     if keep_existing and current_guild:
         guild_id = current_guild
@@ -173,8 +173,8 @@ def setup(env_path: Path, template: Path | None = None, keep_existing: bool = Fa
         env_path,
         {
             "DISCORD_TOKEN": token,
-            "FIER_CLIENT_ID": str(data["id"]),
-            "FIER_ALLOWED_GUILD_ID": guild_id,
+            "NOIR_CLIENT_ID": str(data["id"]),
+            "NOIR_ALLOWED_GUILD_ID": guild_id,
         },
     )
     print(f"Saved securely to {env_path}.")
@@ -196,7 +196,7 @@ def upgrade(env_file: Path) -> None:
     from .store import Store
 
     settings = Settings.load(require_token=False, env_file=env_file)
-    store = Store(settings.data_dir / "fier.sqlite3")
+    store = Store(settings.data_dir / "noir.sqlite3")
     backend = DockerBackend(settings)
     manager = Manager(settings, store, backend)
     try:
@@ -211,7 +211,7 @@ def upgrade(env_file: Path) -> None:
     for instance_id, ok in results:
         print(f"{instance_id}: {'upgraded to root runtime' if ok else 'UPGRADE FAILED'}")
     if failed:
-        raise FierError("Some VPS upgrades failed: " + ", ".join(failed))
+        raise NoirError("Some VPS upgrades failed: " + ", ".join(failed))
 
 
 def run() -> None:
@@ -223,7 +223,7 @@ def run() -> None:
 
     settings = Settings.load()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    store = Store(settings.data_dir / "fier.sqlite3")
+    store = Store(settings.data_dir / "noir.sqlite3")
     backend = DockerBackend(settings)
     manager = Manager(settings, store, backend)
     bot = build_bot(settings, manager, backend)
@@ -240,9 +240,9 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
     logging.getLogger("discord.http").setLevel(logging.WARNING)
-    parser = argparse.ArgumentParser(prog="fier", description="FIER Discord VPS manager")
+    parser = argparse.ArgumentParser(prog="noir", description="NOIR Discord VPS manager")
     parser.add_argument("command", choices=["run", "setup", "doctor", "upgrade", "version"])
-    parser.add_argument("--env-file", type=Path, default=Path("/etc/fier/fier.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("/etc/noir/noir.env"))
     parser.add_argument(
         "--keep-existing-token",
         action="store_true",
@@ -278,14 +278,14 @@ def main() -> None:
             images = ", ".join(f"{os_key}={image}" for os_key, image in settings.images.items())
             print(
                 f"Docker OK: {info.get('ServerVersion')} · images {images} · "
-                f"disk helper OK · storage={info.get('fier_storage_mode', 'unknown')}"
+                f"disk helper OK · storage={info.get('noir_storage_mode', 'unknown')}"
             )
-            if info.get("fier_storage_mode") == "directory":
+            if info.get("noir_storage_mode") == "directory":
                 print(
                     "Note: loop mounts are unavailable on this host; VPS homes use directory "
                     "storage. Disk sizes are reserved budgets, not hard filesystem quotas."
                 )
-    except FierError as exc:
+    except NoirError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         raise SystemExit(1) from None
     except KeyboardInterrupt:

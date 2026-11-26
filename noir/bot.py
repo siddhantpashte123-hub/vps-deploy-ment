@@ -11,16 +11,18 @@ from .errors import UserError
 from .manager import Manager
 from .models import Actor, Specs
 from .ui import (
-    COLOR,
     ConfirmView,
     DeployOSView,
     ManageView,
+    PanelHubView,
     UserDeleteView,
     banner_file,
     empty_embed,
     error_text,
+    help_embed,
     instance_embed,
     os_choice_embed,
+    panel_hub_embed,
     user_delete_embed,
 )
 
@@ -33,7 +35,7 @@ def mention_id(raw: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-class FierBot(commands.Bot):
+class NoirBot(commands.Bot):
     def __init__(self, settings: Settings, manager: Manager, backend):
         intents = discord.Intents.default()
         intents.message_content = True
@@ -49,18 +51,61 @@ class FierBot(commands.Bot):
         self.backend = backend
         self._ready_logged = False
 
+    def locked_guild(self) -> discord.Guild | None:
+        allowed = self.settings.allowed_guild_id
+        return self.get_guild(allowed) if allowed is not None else None
+
     def actor_for(self, user: discord.Member | discord.User, guild_id: int | None) -> Actor:
-        if guild_id is None:
-            raise UserError("Use FIER inside a Discord server, not in DMs.")
         allowed = self.settings.allowed_guild_id
         if allowed is None:
-            raise UserError("FIER_ALLOWED_GUILD_ID is not configured. Run setup again.")
-        if guild_id != allowed:
+            raise UserError("NOIR_ALLOWED_GUILD_ID is not configured. Run setup again.")
+        if guild_id is not None and guild_id != allowed:
             raise UserError("This bot is locked to one Discord server.")
         is_admin = user.id in self.settings.admin_ids
-        if isinstance(user, discord.Member):
+        if isinstance(user, discord.Member) and user.guild.id == allowed:
             is_admin = is_admin or user.guild_permissions.administrator
-        return Actor(user.id, guild_id, is_admin)
+        elif guild_id is None:
+            guild = self.locked_guild()
+            cached = guild.get_member(user.id) if guild is not None else None
+            if isinstance(cached, discord.Member):
+                is_admin = is_admin or cached.guild_permissions.administrator
+        return Actor(user.id, allowed, is_admin)
+
+    async def resolve_actor(
+        self, user: discord.Member | discord.User, guild_id: int | None
+    ) -> Actor:
+        allowed = self.settings.allowed_guild_id
+        if allowed is None:
+            raise UserError("NOIR_ALLOWED_GUILD_ID is not configured. Run setup again.")
+        if guild_id is not None and guild_id != allowed:
+            raise UserError("This bot is locked to one Discord server.")
+        if isinstance(user, discord.Member) and user.guild.id == allowed:
+            return self.actor_for(user, allowed)
+        # Direct Message or uncached interaction: verify membership in the locked server
+        # unless the user is an explicit host admin or already owns a VPS in the store.
+        guild = self.locked_guild()
+        member: discord.Member | None = None
+        if guild is not None:
+            member = guild.get_member(user.id)
+            if not isinstance(member, discord.Member):
+                try:
+                    member = await guild.fetch_member(user.id)
+                except discord.NotFound:
+                    member = None
+                except discord.HTTPException as exc:
+                    raise UserError(
+                        "Could not verify your membership in the server. Try again in a moment."
+                    ) from exc
+        if isinstance(member, discord.Member):
+            return self.actor_for(member, allowed)
+        if user.id in self.settings.admin_ids:
+            return Actor(user.id, allowed, True)
+        owned = await self.manager.list(Actor(user.id, allowed, False))
+        if owned:
+            return Actor(user.id, allowed, False)
+        raise UserError(
+            "Direct-message control is only available to members of NOIR's locked server."
+        )
 
     async def setup_hook(self) -> None:
         import asyncio
@@ -87,10 +132,12 @@ class FierBot(commands.Bot):
                 if guild.id != allowed:
                     await self._leave_guild(guild)
         if not self._ready_logged:
-            log.info("FIER_READY bot=%s id=%s", self.user, self.user.id if self.user else "unknown")
+            log.info("NOIR_READY bot=%s id=%s", self.user, self.user.id if self.user else "unknown")
             self._ready_logged = True
         await self.change_presence(
-            activity=discord.Activity(type=discord.ActivityType.watching, name="!deploy • !manage")
+            activity=discord.Activity(
+                type=discord.ActivityType.watching, name="!manage • Server & DM"
+            )
         )
 
     async def on_command_error(self, ctx: commands.Context, error: commands.CommandError) -> None:
@@ -120,31 +167,34 @@ class FierBot(commands.Bot):
 
 
 async def resolve_member(ctx: commands.Context, user_id: int) -> discord.Member:
-    member = ctx.guild.get_member(user_id)
+    guild = ctx.guild or ctx.bot.locked_guild()
+    if guild is None:
+        raise UserError(
+            "NOIR cannot reach its locked server right now. Run this command inside the server."
+        )
+    member = guild.get_member(user_id)
     if member is None:
         member = discord.utils.get(ctx.message.mentions, id=user_id)
-    if isinstance(member, discord.Member) and member.guild.id == ctx.guild.id:
+    if isinstance(member, discord.Member) and member.guild.id == guild.id:
         return member
     try:
-        return await ctx.guild.fetch_member(user_id)
+        return await guild.fetch_member(user_id)
     except discord.NotFound as exc:
         raise UserError("That user is not a member of this server.") from exc
     except discord.HTTPException as exc:
         raise UserError("Could not look up that member. Try again in a moment.") from exc
 
 
-def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
+def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
     if settings.allowed_guild_id is None:
         raise UserError(
-            "FIER_ALLOWED_GUILD_ID is required. Run the installer or `python -m fier setup` "
+            "NOIR_ALLOWED_GUILD_ID is required. Run the installer or `python -m noir setup` "
             "and enter the one server ID this bot may stay in."
         )
-    bot = FierBot(settings, manager, backend)
+    bot = NoirBot(settings, manager, backend)
 
     async def guild_check(ctx: commands.Context) -> bool:
-        if ctx.guild is None:
-            raise commands.NoPrivateMessage("Use FIER commands in a server.")
-        if ctx.guild.id != settings.allowed_guild_id:
+        if ctx.guild is not None and ctx.guild.id != settings.allowed_guild_id:
             raise commands.CheckFailure("This bot is restricted to another Discord server.")
         return True
 
@@ -156,7 +206,7 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
         ctx: commands.Context, ram: int, cpu: int, disk: int, target: str | None = None
     ):
         """Admin-only: deploy for yourself or a mentioned member, then choose an OS."""
-        actor = bot.actor_for(ctx.author, ctx.guild.id)
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
         if not actor.is_admin:
             raise UserError("Only server administrators can create VPSes.")
         specs = Specs(ram, cpu, disk)
@@ -186,8 +236,9 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
     @bot.command(name="manage")
     @commands.cooldown(2, 10, commands.BucketType.user)
     async def manage(ctx: commands.Context, instance_id: str | None = None):
-        """Open your VPS panel: Start, Stop, Reinstall, SSHX, Delete."""
-        actor = bot.actor_for(ctx.author, ctx.guild.id)
+        """Open your VPS panel in the server or in bot DMs."""
+        in_dm = ctx.guild is None
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
         instances = await manager.list(actor)
         selected = None
         if instance_id:
@@ -198,7 +249,7 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
         elif instances:
             selected = instances[0].id
         instance = next((i for i in instances if i.id == selected), None)
-        view = ManageView(bot, actor, instances, selected)
+        view = ManageView(bot, actor, instances, selected, in_dm=in_dm)
         message = await ctx.send(
             embed=instance_embed(instance) if instance else empty_embed(),
             file=banner_file(),
@@ -214,6 +265,36 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
                 mention_author=False,
             )
 
+    @bot.command(name="panel")
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def panel(ctx: commands.Context):
+        """Post an interactive NOIR Cloud Panel card (or open your DM console in DMs)."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if ctx.guild is None:
+            instances = await manager.list(actor)
+            selected = instances[0].id if instances else None
+            view = ManageView(bot, actor, instances, selected, in_dm=True)
+            message = await ctx.send(
+                embed=instance_embed(instances[0]) if instances else empty_embed(),
+                file=banner_file(),
+                view=view,
+                reference=ctx.message,
+                mention_author=False,
+            )
+            view.message = message
+            return
+        if not actor.is_admin:
+            raise UserError("Only server administrators can post the server cloud panel.")
+        fleet = [i for i in bot.manager.store.list() if i.guild_id == actor.guild_id]
+        guild_name = getattr(ctx.guild, "name", None) or "Private Cloud"
+        await ctx.send(
+            embed=panel_hub_embed(guild_name, len(fleet)),
+            file=banner_file(),
+            view=PanelHubView(bot),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
     @bot.command(name="delete", ignore_extra=False)
     @commands.cooldown(2, 10, commands.BucketType.user)
     async def delete(
@@ -223,10 +304,11 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
         disk: int | None = None,
     ):
         """Delete by mention (admin picks one), by ID, or by your exact RAM CPU DISK."""
-        actor = bot.actor_for(ctx.author, ctx.guild.id)
+        in_dm = ctx.guild is None
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
         if first is None:
             instances = await manager.list(actor)
-            view = ManageView(bot, actor, instances)
+            view = ManageView(bot, actor, instances, in_dm=in_dm)
             message = await ctx.send(
                 embed=instance_embed(instances[0]) if instances else empty_embed(),
                 file=banner_file(),
@@ -293,50 +375,17 @@ def build_bot(settings: Settings, manager: Manager, backend) -> FierBot:
 
     @bot.command(name="help")
     async def help_command(ctx: commands.Context):
-        embed = discord.Embed(
-            title="FIER · VPS control",
-            color=COLOR,
-            description=(
-                "Admin-created Ubuntu 24.04 / Debian 12 development containers, "
-                "controlled from Discord."
-            ),
+        await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        await ctx.send(
+            embed=help_embed(settings),
+            file=banner_file(),
+            reference=ctx.message,
+            mention_author=False,
         )
-        embed.add_field(
-            name="Deploy (admins only)",
-            value=(
-                "`!deploy 1 1 1 @user` — create for that member\n"
-                "`!deploy 1 1 1` — create for yourself\n"
-                "RAM GiB · CPU cores · disk GiB, then choose the OS."
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Manage",
-            value=(
-                "`!manage` or `!manage <id>`\nStart · Stop · Reinstall (choose OS) · SSHX · Delete"
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Delete",
-            value=(
-                "`!delete @user` — admin picks one of that member's VPSes, then confirms\n"
-                "`!delete <id>` or `!delete 1 1 1` — delete your own matching VPS; "
-                "confirmation required."
-            ),
-            inline=False,
-        )
-        embed.set_footer(
-            text=(
-                f"Per-user limit: {settings.max_per_user} • Max plan: "
-                f"{settings.max_ram_gb} GiB RAM / {settings.max_cpu} CPU / "
-                f"{settings.max_disk_gb} GiB disk"
-            )
-        )
-        await ctx.send(embed=embed, file=banner_file(), reference=ctx.message, mention_author=False)
 
     @bot.command(name="ping")
     async def ping(ctx: commands.Context):
+        await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
         await ctx.send(
             f"Pong! Gateway latency: {bot.latency * 1000:.0f} ms",
             reference=ctx.message,

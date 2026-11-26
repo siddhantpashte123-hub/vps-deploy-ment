@@ -13,6 +13,6 @@ jobs:
           python-version: '3.11'
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest -q
-      - run: ruff check fier scripts/fetch_sshx.py scripts/fier-volume runtime/fier-sshx tests
+      - run: ruff check noir scripts/fetch_sshx.py scripts/noir-volume runtime/noir-sshx tests
       - run: bash -n install.sh
-      - run: python -m compileall -q fier scripts/fetch_sshx.py
+      - run: python -m compileall -q noir scripts/fetch_sshx.py

@@ -67,7 +67,7 @@ class Manager:
 
     async def get(self, actor: Actor, instance_id: str) -> Instance:
         if not valid_id(instance_id):
-            raise UserError("Use a valid VPS ID, for example `fier-a1b2c3d4e5f6`.")
+            raise UserError("Use a valid VPS ID, for example `noir-a1b2c3d4e5f6`.")
         return self.authorize(actor, await asyncio.to_thread(self.store.get, instance_id))
 
     async def list(self, actor: Actor) -> list[Instance]:
@@ -129,7 +129,7 @@ class Manager:
                 raise UserError("Not enough host disk space (including a 1 GiB safety reserve).")
             now = utc_now()
             instance = Instance(
-                id="fier-" + secrets.token_hex(6),
+                id="noir-" + secrets.token_hex(6),
                 guild_id=actor.guild_id,
                 owner_id=owner_id,
                 ram_gb=specs.ram_gb,

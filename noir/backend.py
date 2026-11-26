@@ -19,14 +19,17 @@ from .models import Specs, valid_id
 from .os_catalog import DEFAULT_OS, os_label
 
 log = logging.getLogger(__name__)
-LABEL = "io.github.fier.managed"
+LABEL = "io.github.noir.managed"
+# Pre-NOIR installs created containers/networks with the legacy label; keep
+# recognizing them so existing VPSes survive the rename and upgrade cleanly.
+LEGACY_LABEL = "io.github.fier.managed"
 URL_RE = re.compile(r"https://sshx\.io/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+")
 
 # Root is confined to the VPS container. These are Docker's default unprivileged
 # container capabilities; no SYS_ADMIN, privileged mode, host PID/network, Docker
 # socket, or host filesystem mount is granted.
 ROOT_USER = "0:0"
-VPS_HOME = "/home/fier"
+VPS_HOME = "/home/noir"
 ROOT_CAPABILITIES = [
     "AUDIT_WRITE",
     "CHOWN",
@@ -138,27 +141,28 @@ class DockerBackend:
                 )
             else:
                 network.reload()
-                if network.attrs.get("Labels", {}).get(LABEL) != "true":
-                    raise BackendError("FIER_NETWORK exists but is not managed by FIER.")
-            self._helper("check", "fier-000000000000")
-            mode = self._helper("probe", "fier-000000000000")
+                net_labels = network.attrs.get("Labels", {})
+                if net_labels.get(LABEL) != "true" and net_labels.get(LEGACY_LABEL) != "true":
+                    raise BackendError("NOIR_NETWORK exists but is not managed by NOIR.")
+            self._helper("check", "noir-000000000000")
+            mode = self._helper("probe", "noir-000000000000")
             if mode not in {"loop", "directory"}:
                 raise BackendError("Disk helper returned an unknown storage mode.")
             self.storage_mode = mode
-            info["fier_storage_mode"] = mode
+            info["noir_storage_mode"] = mode
             return info
         except ImageNotFound as exc:
             raise BackendError("VPS image is missing. Re-run install.sh to build it.") from exc
         except (DockerException, OSError) as exc:
             raise BackendError(
-                "Docker is unavailable. Check the Docker service and the fier user's docker group."
+                "Docker is unavailable. Check the Docker service and the noir user's docker group."
             ) from exc
 
     def mount_path(self, instance_id: str) -> str:
         if not valid_id(instance_id):
             raise BackendError("Invalid VPS identifier.")
         # Must match the fixed STATE_ROOT in the root-owned volume helper.
-        return f"/var/lib/fier/mounts/{instance_id}"
+        return f"/var/lib/noir/mounts/{instance_id}"
 
     def _run_container(
         self,
@@ -184,17 +188,17 @@ class DockerBackend:
                     "HOME": VPS_HOME,
                     "USER": "root",
                     "LOGNAME": "root",
-                    "FIER_VPS_ID": instance_id,
-                    "FIER_ROOT_ACCESS": "1",
+                    "NOIR_VPS_ID": instance_id,
+                    "NOIR_ROOT_ACCESS": "1",
                     "PIP_DISABLE_PIP_VERSION_CHECK": "1",
                 },
                 labels={
                     LABEL: "true",
-                    "fier.id": instance_id,
-                    "fier.owner": str(owner_id),
-                    "fier.guild": str(guild_id),
-                    "fier.runtime": "root-v2",
-                    "fier.os": os_key,
+                    "noir.id": instance_id,
+                    "noir.owner": str(owner_id),
+                    "noir.guild": str(guild_id),
+                    "noir.runtime": "root-v2",
+                    "noir.os": os_key,
                 },
                 network=self.settings.network,
                 mem_limit=specs.memory_bytes,
@@ -275,11 +279,11 @@ class DockerBackend:
         try:
             container = self.client.containers.get(instance_id)
             container.reload()
-            if (
-                container.labels.get(LABEL) != "true"
-                or container.labels.get("fier.id") != instance_id
-            ):
-                raise BackendError("Refusing to control a container not managed by FIER.")
+            labels = container.labels
+            managed = labels.get(LABEL) == "true" or labels.get(LEGACY_LABEL) == "true"
+            label_id = labels.get("noir.id") or labels.get("fier.id")
+            if not managed or label_id != instance_id:
+                raise BackendError("Refusing to control a container not managed by NOIR.")
             return container
         except DockerNotFound:
             return None
@@ -341,12 +345,12 @@ class DockerBackend:
             raise BackendError("Could not run the terminal helper inside the VPS.") from exc
 
     def sshx(self, instance_id: str) -> str:
-        code, _ = self._exec(instance_id, ["/usr/local/bin/fier-sshx", "start", instance_id])
+        code, _ = self._exec(instance_id, ["/usr/local/bin/noir-sshx", "start", instance_id])
         if code != 0:
             raise BackendError("SSHX could not start inside the VPS.")
         # Return only the URL to the caller; never log exec output (it is a capability).
         for _ in range(30):
-            code, output = self._exec(instance_id, ["/usr/local/bin/fier-sshx", "url"])
+            code, output = self._exec(instance_id, ["/usr/local/bin/noir-sshx", "url"])
             url = parse_sshx_url(output) if code == 0 else None
             if url:
                 return url
@@ -356,14 +360,17 @@ class DockerBackend:
         )
 
     def close_sshx(self, instance_id: str) -> None:
-        self._exec(instance_id, ["/usr/local/bin/fier-sshx", "stop"])
+        self._exec(instance_id, ["/usr/local/bin/noir-sshx", "stop"])
 
     def reconcile(self, known_ids: set[str]) -> dict[str, str]:
         try:
-            containers = self.client.containers.list(all=True, filters={"label": LABEL})
+            seen: dict[str, Any] = {}
+            for label in (LABEL, LEGACY_LABEL):
+                for container in self.client.containers.list(all=True, filters={"label": label}):
+                    seen[container.id] = container
             result = {}
-            for container in containers:
-                instance_id = container.labels.get("fier.id", "")
+            for container in seen.values():
+                instance_id = container.labels.get("noir.id") or container.labels.get("fier.id", "")
                 if valid_id(instance_id) and instance_id in known_ids:
                     container.reload()
                     result[instance_id] = (

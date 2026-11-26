@@ -6,27 +6,37 @@ from pathlib import Path
 
 import discord
 
-from .errors import FierError, UserError
+from .errors import NoirError, UserError
 from .models import Actor, Instance, Specs
 from .os_catalog import DEFAULT_OS, OS_CHOICES, os_choice, os_label
 
 log = logging.getLogger(__name__)
 
-COLOR = 0x8B5CF6
-ACCENT = 0x22D3EE
-SUCCESS = 0x10B981
+# NOIR dark-slate & blurple palette (native dark cards with crisp left accent bars)
+COLOR = 0x5865F2
+ACCENT = 0x38BDF8
+SUCCESS = 0x22C55E
+WARNING = 0xF59E0B
 DANGER = 0xEF4444
 MUTED = 0x64748B
-STATUS_ICON = {
-    "running": "🟢",
-    "stopped": "⚪",
-    "error": "🔴",
-    "provisioning": "🚀",
-    "reinstalling": "♻️",
-    "deleting": "🗑️",
+STATUS_PILL = {
+    "running": ("🟢", "ONLINE"),
+    "stopped": ("⚪", "STOPPED"),
+    "error": ("🔴", "ERROR"),
+    "provisioning": ("🟡", "PROVISIONING"),
+    "reinstalling": ("🟡", "REINSTALLING"),
+    "deleting": ("🔴", "DELETING"),
 }
-BANNER_PATH = Path(__file__).resolve().parent.parent / "assets" / "fier-banner.png"
-BANNER_FILENAME = "fier-banner.png"
+STATUS_COLOR = {
+    "running": SUCCESS,
+    "stopped": MUTED,
+    "error": DANGER,
+    "provisioning": WARNING,
+    "reinstalling": WARNING,
+    "deleting": DANGER,
+}
+BANNER_PATH = Path(__file__).resolve().parent.parent / "assets" / "noir-banner.png"
+BANNER_FILENAME = "noir-banner.png"
 
 DEPLOY_STAGES = [
     ("validate", "Validate plan", 5),
@@ -42,11 +52,11 @@ DEPLOY_STAGES = [
 def error_text(exc: Exception) -> str:
     if isinstance(exc, UserError):
         return str(exc)
-    if isinstance(exc, FierError):
+    if isinstance(exc, NoirError):
         return (
             "The host could not complete that action. Try again or contact the host administrator."
         )
-    return "Something went wrong. The host administrator can check `journalctl -u fier`."
+    return "Something went wrong. The host administrator can check `journalctl -u noir`."
 
 
 def banner_file() -> discord.File | None:
@@ -55,42 +65,8 @@ def banner_file() -> discord.File | None:
     return None
 
 
-def _brand(embed: discord.Embed) -> discord.Embed:
-    embed.set_footer(text="FIER • Private Cloud Console")
-    if BANNER_PATH.is_file():
-        embed.set_image(url=f"attachment://{BANNER_FILENAME}")
-    return embed
-
-
-def instance_embed(instance: Instance) -> discord.Embed:
-    icon = STATUS_ICON.get(instance.status, "🟡")
-    color = (
-        SUCCESS if instance.status == "running" else DANGER if instance.status == "error" else COLOR
-    )
-    embed = discord.Embed(
-        title=f"⚡ FIER · {instance.id}",
-        description=(
-            f"{icon} **{instance.status.upper()}**  ·  `{os_label(instance.os)}`\n"
-            "🔐 **Root terminal** · persistent home · isolated container"
-        ),
-        color=color,
-    )
-    embed.add_field(name="🧠 Memory", value=f"**{instance.ram_gb}** GiB", inline=True)
-    embed.add_field(name="⚙️ Compute", value=f"**{instance.cpu}** vCPU", inline=True)
-    embed.add_field(name="💾 Storage", value=f"**{instance.disk_gb}** GiB", inline=True)
-    embed.add_field(name="👤 Owner", value=f"<@{instance.owner_id}>", inline=True)
-    embed.add_field(name="🌐 Network", value="Private bridge", inline=True)
-    embed.add_field(
-        name="🕒 Updated", value=f"<t:{int(_timestamp(instance.updated_at))}:R>", inline=True
-    )
-    embed.add_field(
-        name="💻 Terminal",
-        value=(
-            "Press **SSHX** for a private **root** browser terminal. No public SSH port is exposed."
-        ),
-        inline=False,
-    )
-    embed.set_footer(text="Start/Stop preserve files • Reinstall/Delete destroy files")
+def _brand(embed: discord.Embed, subtitle: str = "Private Cloud & Root VPS") -> discord.Embed:
+    embed.set_footer(text=f"NOIR Utility • {subtitle}")
     if BANNER_PATH.is_file():
         embed.set_image(url=f"attachment://{BANNER_FILENAME}")
     return embed
@@ -105,17 +81,137 @@ def _timestamp(value: str) -> float:
         return 0
 
 
-def empty_embed() -> discord.Embed:
-    return _brand(
-        discord.Embed(
-            title="⚡ FIER · Your private cloud",
-            description=(
-                "No VPSes yet. An admin can launch your first root instance:\n"
-                "```text\n!deploy 1 1 1 @user\n```\n"
-                "`RAM GiB` · `CPU cores` · `Disk GiB` · then choose Ubuntu 24.04 or Debian 12"
-            ),
-            color=COLOR,
+def instance_embed(instance: Instance) -> discord.Embed:
+    dot, label = STATUS_PILL.get(instance.status, ("🟡", instance.status.upper()))
+    color = STATUS_COLOR.get(instance.status, COLOR)
+    ts = int(_timestamp(instance.updated_at))
+    embed = discord.Embed(
+        title="Server VPS Console",
+        description=(
+            f"**Status**\n`{dot} {label}`\n\n"
+            "Isolated **Root terminal** container with persistent home storage. "
+            "Control this VPS here or directly in **bot DMs** with `!manage`."
+        ),
+        color=color,
+    )
+    embed.set_author(name="NOIR Cloud")
+    embed.add_field(
+        name="Resources",
+        value=(
+            f"RAM: **{instance.ram_gb} GiB**\n"
+            f"CPU: **{instance.cpu} vCPU**\n"
+            f"Disk: **{instance.disk_gb} GiB**"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Environment",
+        value=(
+            f"OS: **{os_label(instance.os)}**\nOwner: <@{instance.owner_id}>\nUpdated: <t:{ts}:R>"
+        ),
+        inline=True,
+    )
+    embed.add_field(
+        name="Root Terminal",
+        value=(
+            "Click **SSHX** below to open a private **root** browser terminal. "
+            "No public SSH port is exposed."
+        ),
+        inline=False,
+    )
+    embed.set_footer(
+        text=(
+            f"vID: {instance.id} • Managed Via NOIR • "
+            "Start/Stop preserve files • Reinstall/Delete erase files"
         )
+    )
+    if BANNER_PATH.is_file():
+        embed.set_image(url=f"attachment://{BANNER_FILENAME}")
+    return embed
+
+
+def empty_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="NOIR Cloud Panel",
+        description=(
+            "You do not have an active VPS yet. Ask a server administrator to provision "
+            "a dedicated root container for you, or deploy one if you are an admin:\n"
+            "```text\n!deploy 1 1 1 @user\n```\n"
+            "Once created, you can control your VPS in the server or anytime in **bot DMs** "
+            "using `!manage`."
+        ),
+        color=COLOR,
+    )
+    embed.set_author(name="NOIR Utility")
+    return _brand(embed, "Interactive Cloud Control")
+
+
+def panel_hub_embed(guild_name: str, count: int) -> discord.Embed:
+    embed = discord.Embed(
+        title="Server Cloud Panel",
+        description=(
+            "Manage your isolated Ubuntu 24.04 or Debian 12 root VPS directly from Discord! "
+            "Click a button below to open your personal control panel here or have NOIR send "
+            "a private control console to your **DMs**."
+        ),
+        color=COLOR,
+    )
+    embed.set_author(name=f"NOIR • {guild_name}")
+    embed.add_field(
+        name="Active Fleet",
+        value=f"**{count}** provisioned VPS instance{'s' if count != 1 else ''}",
+        inline=True,
+    )
+    embed.add_field(
+        name="Direct Messages",
+        value="Send `!manage` or `!help` to NOIR in DMs anytime",
+        inline=True,
+    )
+    return _brand(embed, "Constructive & Interactive Cloud Control")
+
+
+def help_embed(settings) -> discord.Embed:
+    embed = discord.Embed(
+        title="NOIR Command & DM Guide",
+        description=(
+            "Admin-provisioned Ubuntu 24.04 & Debian 12 root containers. "
+            "Every control command works both in your locked Discord server **and in bot DMs**."
+        ),
+        color=COLOR,
+    )
+    embed.set_author(name="NOIR Utility")
+    embed.add_field(
+        name="My VPS & DM Control",
+        value=(
+            "`!manage` or `!manage <id>` — Start · Stop · Refresh · SSHX · Reinstall · Delete\n"
+            "`!panel` — Post an interactive **My VPS / Control in DM** hub card\n"
+            "💬 **In bot DMs:** send `!manage`, `!delete <id>`, "
+            "`!deploy 1 1 1 <@USER_ID>`, or `!help`"
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Deploy (Admins Only)",
+        value=(
+            "`!deploy 1 1 1 @user` (or `<@USER_ID>` in DMs) — create a VPS for a server member\n"
+            "`!deploy 1 1 1` — create a VPS for yourself\n"
+            "Format: `RAM GiB` · `CPU cores` · `Disk GiB`, then pick Ubuntu 24.04 or Debian 12."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Delete",
+        value=(
+            "`!delete @user` — admin selects **one** of that member's VPSes, then confirms\n"
+            "`!delete <id>` or `!delete 1 1 1` — delete your own matching VPS "
+            "(confirmation required)"
+        ),
+        inline=False,
+    )
+    return _brand(
+        embed,
+        f"Limit: {settings.max_per_user}/user • Max plan: "
+        f"{settings.max_ram_gb} GiB RAM / {settings.max_cpu} CPU / {settings.max_disk_gb} GiB disk",
     )
 
 
@@ -124,16 +220,21 @@ def user_delete_embed(owner_id: int, instances: list[Instance], page: int = 0) -
     pages = max(1, (len(instances) + page_size - 1) // page_size)
     page = max(0, min(page, pages - 1))
     chunk = instances[page * page_size : (page + 1) * page_size]
-    lines = [f"• `{i.id}` · {os_label(i.os)} · {i.specs.label()} · {i.status}" for i in chunk]
+    lines = [
+        f"• `{i.id}` · **{os_label(i.os)}** · {i.specs.label()} · `{i.status.upper()}`"
+        for i in chunk
+    ]
     embed = discord.Embed(
-        title="🗑️ FIER · Delete a member's VPS",
+        title="Delete Member VPS",
         description=(
-            f"Admin selection for <@{owner_id}>. Choose **one** VPS below, then confirm. "
+            f"**Target:** <@{owner_id}>\n"
+            "Select **one** VPS from the menu below, then confirm. "
             "Nothing is deleted until you confirm.\n\n" + "\n".join(lines)
         ),
         color=DANGER,
     )
-    embed.set_footer(text=f"FIER • Page {page + 1}/{pages} • Confirmation required")
+    embed.set_author(name="NOIR Admin")
+    embed.set_footer(text=f"NOIR Utility • Page {page + 1}/{pages} • Confirmation required")
     if BANNER_PATH.is_file():
         embed.set_image(url=f"attachment://{BANNER_FILENAME}")
     return embed
@@ -154,6 +255,7 @@ def deploy_progress_embed(
 ) -> discord.Embed:
     percent = max(0, min(100, percent))
     current = next((label for key, label, _ in DEPLOY_STAGES if key == stage), "Working")
+    status_pill = "🟢 ONLINE" if percent >= 100 else "🟡 PROVISIONING"
     pipeline = []
     for key, label, threshold in DEPLOY_STAGES:
         if percent >= 100 or threshold < percent:
@@ -163,34 +265,36 @@ def deploy_progress_embed(
         else:
             pipeline.append(f"⬜ {label}")
     embed = discord.Embed(
-        title="🚀 FIER · Deploying your VPS",
+        title="Provisioning Root VPS",
         description=(
-            f"`{_bar(percent)}` **{percent}%**\n"
-            f"Current phase: **{current}**\n\n" + "\n".join(pipeline)
+            f"**Status**\n`{status_pill}` · **{percent}%**\n"
+            f"`{_bar(percent)}` — **{current}**\n\n" + "\n".join(pipeline)
         ),
         color=ACCENT if percent < 100 else SUCCESS,
     )
-    embed.add_field(name="📦 Plan", value=specs.label(), inline=False)
-    embed.add_field(name="🔐 Access", value="Root SSHX terminal", inline=True)
-    embed.add_field(name="🧩 OS", value=os_label(os_key), inline=True)
+    embed.set_author(name="NOIR Cloud")
+    embed.add_field(name="Plan", value=specs.label(), inline=True)
+    embed.add_field(name="OS", value=os_label(os_key), inline=True)
+    embed.add_field(name="Access", value="Root SSHX terminal", inline=True)
     if owner_id is not None:
-        embed.add_field(name="👤 Owner", value=f"<@{owner_id}>", inline=True)
-    return _brand(embed)
+        embed.add_field(name="Owner", value=f"<@{owner_id}>", inline=True)
+    return _brand(embed, "Live Provisioning Pipeline")
 
 
 def deploy_failure_embed(
     specs: Specs, message: str, os_key: str = DEFAULT_OS, owner_id: int | None = None
 ) -> discord.Embed:
     embed = discord.Embed(
-        title="🛑 FIER · Deployment failed",
-        description=message,
+        title="NOIR · Deployment failed",
+        description=f"**Status**\n`🔴 FAILED`\n\n{message}",
         color=DANGER,
     )
-    embed.add_field(name="📦 Plan", value=specs.label(), inline=False)
-    embed.add_field(name="🧩 OS", value=os_label(os_key), inline=True)
+    embed.set_author(name="NOIR Cloud")
+    embed.add_field(name="Plan", value=specs.label(), inline=True)
+    embed.add_field(name="OS", value=os_label(os_key), inline=True)
     if owner_id is not None:
-        embed.add_field(name="👤 Owner", value=f"<@{owner_id}>", inline=True)
-    return _brand(embed)
+        embed.add_field(name="Owner", value=f"<@{owner_id}>", inline=True)
+    return _brand(embed, "Provisioning Aborted")
 
 
 def os_choice_embed(
@@ -198,23 +302,25 @@ def os_choice_embed(
 ) -> discord.Embed:
     action = "Reinstall" if reinstall else "Deploy"
     embed = discord.Embed(
-        title=f"🧩 FIER · Choose an OS to {action.lower()}",
+        title=f"Select Operating System · {action}",
         description=(
-            "Select the operating system for this root VPS. "
+            "**Status**\n`🟡 AWAITING OS SELECTION`\n\n"
+            "Choose the Linux distribution for this isolated root VPS. "
             "Both images include Python, Node.js, Git, build tools, and SSHX."
             + ("\n\n⚠️ Reinstalling **permanently erases all files**." if reinstall else "")
         ),
         color=ACCENT,
     )
-    embed.add_field(name="📦 Plan", value=specs.label(), inline=False)
+    embed.set_author(name="NOIR Cloud")
+    embed.add_field(name="Plan", value=specs.label(), inline=True)
     if owner_id is not None:
-        embed.add_field(name="👤 Owner", value=f"<@{owner_id}>", inline=True)
+        embed.add_field(name="Owner", value=f"<@{owner_id}>", inline=True)
     embed.add_field(
-        name="🧩 Available OS",
+        name="Available Images",
         value="\n".join(f"{choice.emoji} **{choice.label}**" for choice in OS_CHOICES),
         inline=False,
     )
-    return _brand(embed)
+    return _brand(embed, "Ubuntu 24.04 LTS & Debian 12")
 
 
 def _os_select(placeholder: str, selected: str | None = None) -> discord.ui.Select:
@@ -229,6 +335,62 @@ def _os_select(placeholder: str, selected: str | None = None) -> discord.ui.Sele
         for choice in OS_CHOICES
     ]
     return discord.ui.Select(placeholder=placeholder, options=options, min_values=1, max_values=1)
+
+
+class PanelHubView(discord.ui.View):
+    """Interactive NOIR hub card: open an ephemeral panel here or receive a DM console."""
+
+    def __init__(self, bot):
+        super().__init__(timeout=None)
+        self.bot = bot
+
+    @discord.ui.button(label="My VPS", emoji="🖥️", style=discord.ButtonStyle.primary)
+    async def my_vps(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+            instances = await self.bot.manager.list(actor)
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        selected = instances[0].id if instances else None
+        view = ManageView(self.bot, actor, instances, selected, in_dm=False)
+        await interaction.response.send_message(
+            embed=instance_embed(instances[0]) if instances else empty_embed(),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Control in DM", emoji="✉️", style=discord.ButtonStyle.secondary)
+    async def open_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+            instances = await self.bot.manager.list(actor)
+            selected = instances[0].id if instances else None
+            view = ManageView(self.bot, actor, instances, selected, in_dm=True)
+            dm = await interaction.user.create_dm()
+            kwargs = {
+                "embed": instance_embed(instances[0]) if instances else empty_embed(),
+                "view": view,
+            }
+            banner = banner_file()
+            if banner is not None:
+                kwargs["file"] = banner
+            view.message = await dm.send(**kwargs)
+            await interaction.followup.send(
+                "✉️ Sent your **NOIR** control console to your DMs. "
+                "You can also type `!manage` there anytime.",
+                ephemeral=True,
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Could not send you a DM. Enable **Allow direct messages from server members** "
+                "in your Discord privacy settings, then try again.",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
 
 
 class DeployOSView(discord.ui.View):
@@ -247,7 +409,11 @@ class DeployOSView(discord.ui.View):
         self.add_item(self.select)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        actor = self.bot.actor_for(interaction.user, interaction.guild_id)
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+        except UserError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
         if (
             actor.user_id != self.actor.user_id
             or actor.guild_id != self.actor.guild_id
@@ -304,9 +470,10 @@ class DeployOSView(discord.ui.View):
                 view=None,
             )
             return
-        view = ManageView(self.bot, self.actor, [instance], instance.id)
+        in_dm = interaction.guild_id is None
+        view = ManageView(self.bot, self.actor, [instance], instance.id, in_dm=in_dm)
         await message.edit(
-            content=f"✅ VPS deployed for <@{self.owner_id}>: `{instance.id}`",
+            content=f"✅ VPS deployed for <@{self.owner_id}> · `{instance.id}`",
             embed=instance_embed(instance),
             view=view,
         )
@@ -337,7 +504,11 @@ class ReinstallOSView(discord.ui.View):
         self.add_item(self.select)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        actor = self.bot.actor_for(interaction.user, interaction.guild_id)
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+        except UserError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
         if actor.user_id != self.actor.user_id or actor.guild_id != self.actor.guild_id:
             await interaction.response.send_message(
                 "This reinstall choice is not yours.", ephemeral=True
@@ -412,7 +583,11 @@ class ConfirmView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         actor = self.actor
         if self.bot is not None:
-            actor = self.bot.actor_for(interaction.user, interaction.guild_id)
+            try:
+                actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+            except UserError as exc:
+                await interaction.response.send_message(str(exc), ephemeral=True)
+                return False
         if actor.user_id != self.actor.user_id or actor.guild_id != self.actor.guild_id:
             await interaction.response.send_message(
                 "This confirmation is not yours.", ephemeral=True
@@ -522,7 +697,11 @@ class UserDeleteView(discord.ui.View):
         self.next.disabled = self.page >= pages - 1
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        actor = self.bot.actor_for(interaction.user, interaction.guild_id)
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+        except UserError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
         if (
             actor.user_id != self.actor.user_id
             or actor.guild_id != self.actor.guild_id
@@ -596,13 +775,24 @@ class UserDeleteView(discord.ui.View):
 
 
 class ManageView(discord.ui.View):
-    def __init__(self, bot, actor: Actor, instances: list[Instance], selected: str | None = None):
+    def __init__(
+        self,
+        bot,
+        actor: Actor,
+        instances: list[Instance],
+        selected: str | None = None,
+        *,
+        in_dm: bool = False,
+    ):
         super().__init__(timeout=600)
         self.bot = bot
         self.actor = actor
         self.instances = instances
         self.selected = selected or (instances[0].id if instances else None)
+        self.in_dm = in_dm
         self.message: discord.Message | None = None
+        if in_dm:
+            self.remove_item(self.send_dm)
         if len(instances) > 1:
             options = [
                 discord.SelectOption(
@@ -610,11 +800,11 @@ class ManageView(discord.ui.View):
                     description=f"{os_label(i.os)} · {i.specs.label()} · {i.status}"[:100],
                     value=i.id,
                     default=i.id == self.selected,
-                    emoji="⚡",
+                    emoji="🖥️",
                 )
                 for i in instances[:25]
             ]
-            select = discord.ui.Select(placeholder="Choose your VPS…", options=options, row=0)
+            select = discord.ui.Select(placeholder="Switch VPS instance…", options=options, row=0)
             select.callback = self._select  # type: ignore[method-assign]
             self.add_item(select)
         if not instances:
@@ -628,7 +818,11 @@ class ManageView(discord.ui.View):
         return next((i for i in self.instances if i.id == self.selected), None)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        actor = self.bot.actor_for(interaction.user, interaction.guild_id)
+        try:
+            actor = await self.bot.resolve_actor(interaction.user, interaction.guild_id)
+        except UserError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return False
         if actor.user_id != self.actor.user_id or actor.guild_id != self.actor.guild_id:
             await interaction.response.send_message(
                 "Open your own panel with `!manage`.", ephemeral=True
@@ -653,7 +847,7 @@ class ManageView(discord.ui.View):
         try:
             instance = await getattr(self.manager, action)(self.actor, self.selected)
             await interaction.followup.send(
-                f"⚡ `{instance.id}` is now **{instance.status}**.", ephemeral=True
+                f"`{instance.id}` is now **{instance.status.upper()}**.", ephemeral=True
             )
             if self.message:
                 await self.message.edit(embed=instance_embed(instance), view=self)
@@ -679,13 +873,45 @@ class ManageView(discord.ui.View):
             instance = (
                 await self.manager.refresh(self.actor, self.selected) if self.selected else None
             )
-            replacement = ManageView(self.bot, self.actor, self.instances, self.selected)
+            replacement = ManageView(
+                self.bot, self.actor, self.instances, self.selected, in_dm=self.in_dm
+            )
             embed = instance_embed(instance) if instance else empty_embed()
             if self.message:
                 replacement.message = self.message
                 await self.message.edit(embed=embed, view=replacement)
             self.stop()
             await interaction.followup.send("Panel refreshed.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="Open in DM", emoji="✉️", style=discord.ButtonStyle.secondary, row=1)
+    async def send_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            instances = await self.manager.list(self.actor)
+            selected = self.selected if any(i.id == self.selected for i in instances) else None
+            if selected is None and instances:
+                selected = instances[0].id
+            current = next((i for i in instances if i.id == selected), None)
+            dm_view = ManageView(self.bot, self.actor, instances, selected, in_dm=True)
+            dm = await interaction.user.create_dm()
+            kwargs = {
+                "embed": instance_embed(current) if current else empty_embed(),
+                "view": dm_view,
+            }
+            banner = banner_file()
+            if banner is not None:
+                kwargs["file"] = banner
+            dm_view.message = await dm.send(**kwargs)
+            await interaction.followup.send(
+                "✉️ Sent your **NOIR** VPS console to your DMs.", ephemeral=True
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Could not send you a DM. Enable DMs from server members in your privacy settings.",
+                ephemeral=True,
+            )
         except Exception as exc:
             await interaction.followup.send(error_text(exc), ephemeral=True)
 
