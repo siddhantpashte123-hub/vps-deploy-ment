@@ -56,6 +56,15 @@ class Actor:
 
 
 @dataclass(frozen=True)
+class LiveStats:
+    online: bool
+    uptime_seconds: int = 0
+    cpu_percent: float = 0.0
+    ram_used_bytes: int = 0
+    disk_used_bytes: int = 0
+
+
+@dataclass(frozen=True)
 class Instance:
     id: str
     guild_id: int

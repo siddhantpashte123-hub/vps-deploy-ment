@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from noir.models import Specs
+from noir.models import LiveStats, Specs
 from noir.os_catalog import DEFAULT_OS
 
 
@@ -59,6 +59,18 @@ class FakeBackend:
 
     def status(self, instance_id: str) -> str:
         return self.items.get(instance_id, {}).get("status", "error")
+
+    def stats(self, instance_id: str) -> LiveStats:
+        item = self.items.get(instance_id)
+        if not item or item.get("status") != "running":
+            return LiveStats(online=False)
+        return LiveStats(
+            online=True,
+            uptime_seconds=item.get("uptime", 125),
+            cpu_percent=item.get("cpu_percent", 2.4),
+            ram_used_bytes=item.get("ram_used_bytes", 128 * 1024**2),
+            disk_used_bytes=item.get("disk_used_bytes", 320 * 1024**2),
+        )
 
     def start(self, instance_id: str) -> None:
         self.items[instance_id]["status"] = "running"

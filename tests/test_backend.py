@@ -147,3 +147,37 @@ def test_preflight_reports_directory_fallback(settings):
         info = backend.preflight()
     assert info["noir_storage_mode"] == "directory"
     assert backend.storage_mode == "directory"
+
+
+def test_backend_stats_parses_live_docker_telemetry(settings):
+    from datetime import datetime, timedelta, timezone
+
+    started = (datetime.now(timezone.utc) - timedelta(seconds=90)).strftime(
+        "%Y-%m-%dT%H:%M:%S.123456789Z"
+    )
+    container = Mock()
+    container.labels = {"io.github.noir.managed": "true", "noir.id": "noir-a1b2c3d4e5f6"}
+    container.status = "running"
+    container.attrs = {"State": {"Running": True, "StartedAt": started}}
+    container.stats.return_value = {
+        "cpu_stats": {
+            "cpu_usage": {"total_usage": 200_000_000},
+            "system_cpu_usage": 2_000_000_000,
+            "online_cpus": 2,
+        },
+        "precpu_stats": {
+            "cpu_usage": {"total_usage": 100_000_000},
+            "system_cpu_usage": 1_000_000_000,
+        },
+        "memory_stats": {"usage": 300 * 1024**2, "stats": {"inactive_file": 44 * 1024**2}},
+    }
+    container.exec_run.return_value = Mock(exit_code=0, output=b"Used\n536870912\n")
+    client = Mock()
+    client.containers.get.return_value = container
+    backend = DockerBackend(settings, client)
+    live = backend.stats("noir-a1b2c3d4e5f6")
+    assert live.online is True
+    assert 85 <= live.uptime_seconds <= 105
+    assert abs(live.cpu_percent - 20.0) < 0.01
+    assert live.ram_used_bytes == 256 * 1024**2
+    assert live.disk_used_bytes == 512 * 1024**2
