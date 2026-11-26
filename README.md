@@ -5,9 +5,10 @@ Admin-created Ubuntu 24.04 / Debian 12 development containers, controlled from y
 ```text
 !deploy 1 1 1 @user   admin only: RAM (GiB) · CPU cores · disk (GiB), then choose OS
 !deploy 1 1 1         admin only: deploy for yourself, then choose OS
+!status               admin only: live Host Node resource dashboard (CPU, RAM, Disk, Fleet)
 !panel                admin only: post an interactive NOIR Cloud Panel (My VPS + Control in DM)
 !delete @user         admin only: pick one of that member's VPSes, then confirm
-!manage               server or bot DMs: Start · Stop · Reinstall (choose OS) · SSHX · Delete
+!manage               server or bot DMs: Start · Stop · Console · Stats · Reinstall · Refresh
 ```
 
 The installer installs dependencies, builds both VPS images, **asks for your bot token with hidden input**, validates it with Discord, then asks for the **one Discord server (guild) ID** the bot may stay in, starts a systemd service, and waits for the bot to report ready. The bot is locked to that server and automatically leaves any other server.
@@ -86,6 +87,7 @@ The management panel has:
 Other commands (work in the locked server **and in bot DMs** for members/admins of that server):
 
 ```text
+!status                     admin only: open the live Host Node dashboard (CPU, RAM, Disk, Fleet)
 !panel                      post an interactive Server Cloud Panel card (or open your DM console)
 !manage noir-a1b2c3d4e5f6   open a specific VPS
 !delete @user               admin only: list that member's VPSes, pick one, then confirm

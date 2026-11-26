@@ -13,13 +13,15 @@ from .models import Actor, Specs
 from .ui import (
     ConfirmView,
     DeployOSView,
+    HostStatusView,
     ManageView,
     PanelHubView,
     UserDeleteView,
-    banner_file,
+    confirm_embed,
     empty_embed,
     error_text,
     help_embed,
+    host_status_embed,
     instance_embed,
     os_choice_embed,
     panel_hub_embed,
@@ -226,7 +228,6 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         view = DeployOSView(bot, actor, specs, owner_id)
         message = await ctx.send(
             embed=os_choice_embed(specs, owner_id),
-            file=banner_file(),
             view=view,
             reference=ctx.message,
             mention_author=False,
@@ -251,21 +252,16 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         instance = next((i for i in instances if i.id == selected), None)
         stats = await manager.stats(actor, instance.id) if instance is not None else None
         view = ManageView(bot, actor, instances, selected, in_dm=in_dm)
-        send_kwargs: dict = {
-            "embed": (
+        message = await ctx.send(
+            embed=(
                 instance_embed(instance, stats, index=view.current_index())
                 if instance
                 else empty_embed()
             ),
-            "view": view,
-            "reference": ctx.message,
-            "mention_author": False,
-        }
-        if instance is None:
-            banner = banner_file()
-            if banner is not None:
-                send_kwargs["file"] = banner
-        message = await ctx.send(**send_kwargs)
+            view=view,
+            reference=ctx.message,
+            mention_author=False,
+        )
         view.message = message
         if len(instances) > 25:
             await ctx.send(
@@ -284,19 +280,14 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
             selected = instances[0].id if instances else None
             stats = await manager.stats(actor, instances[0].id) if instances else None
             view = ManageView(bot, actor, instances, selected, in_dm=True)
-            send_kwargs: dict = {
-                "embed": (
+            message = await ctx.send(
+                embed=(
                     instance_embed(instances[0], stats, index=1) if instances else empty_embed()
                 ),
-                "view": view,
-                "reference": ctx.message,
-                "mention_author": False,
-            }
-            if not instances:
-                banner = banner_file()
-                if banner is not None:
-                    send_kwargs["file"] = banner
-            message = await ctx.send(**send_kwargs)
+                view=view,
+                reference=ctx.message,
+                mention_author=False,
+            )
             view.message = message
             return
         if not actor.is_admin:
@@ -305,11 +296,27 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         guild_name = getattr(ctx.guild, "name", None) or "Private Cloud"
         await ctx.send(
             embed=panel_hub_embed(guild_name, len(fleet)),
-            file=banner_file(),
             view=PanelHubView(bot),
             reference=ctx.message,
             mention_author=False,
         )
+
+    @bot.command(name="status")
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def status_command(ctx: commands.Context):
+        """Admin-only: open the live Host Node resource dashboard."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if not actor.is_admin:
+            raise UserError("Only server administrators can view the host status dashboard.")
+        host = await manager.host_status(actor)
+        view = HostStatusView(bot, actor)
+        message = await ctx.send(
+            embed=host_status_embed(host),
+            view=view,
+            reference=ctx.message,
+            mention_author=False,
+        )
+        view.message = message
 
     @bot.command(name="delete", ignore_extra=False)
     @commands.cooldown(2, 10, commands.BucketType.user)
@@ -326,19 +333,14 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
             instances = await manager.list(actor)
             stats = await manager.stats(actor, instances[0].id) if instances else None
             view = ManageView(bot, actor, instances, in_dm=in_dm)
-            send_kwargs: dict = {
-                "embed": (
+            message = await ctx.send(
+                embed=(
                     instance_embed(instances[0], stats, index=1) if instances else empty_embed()
                 ),
-                "view": view,
-                "reference": ctx.message,
-                "mention_author": False,
-            }
-            if not instances:
-                banner = banner_file()
-                if banner is not None:
-                    send_kwargs["file"] = banner
-            message = await ctx.send(**send_kwargs)
+                view=view,
+                reference=ctx.message,
+                mention_author=False,
+            )
             view.message = message
             return
         target_id = mention_id(first)
@@ -354,7 +356,6 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
             view = UserDeleteView(bot, actor, member.id, instances)
             message = await ctx.send(
                 embed=user_delete_embed(member.id, instances, view.page),
-                file=banner_file(),
                 view=view,
                 reference=ctx.message,
                 mention_author=False,
@@ -388,8 +389,7 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
             )
         view = ConfirmView(manager, actor, instance, "delete", bot=bot)
         message = await ctx.send(
-            f"⚠️ **Delete `{instance.id}`?** {instance.specs.label()}. "
-            "All files and processes will be permanently destroyed.",
+            embed=confirm_embed(instance, "delete"),
             view=view,
             reference=ctx.message,
             mention_author=False,
@@ -401,7 +401,6 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
         await ctx.send(
             embed=help_embed(settings),
-            file=banner_file(),
             reference=ctx.message,
             mention_author=False,
         )

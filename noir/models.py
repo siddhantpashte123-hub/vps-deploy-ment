@@ -65,6 +65,27 @@ class LiveStats:
 
 
 @dataclass(frozen=True)
+class HostStatus:
+    hostname: str
+    uptime_seconds: int
+    cpu_cores: int
+    cpu_percent: float
+    load_1m: float
+    ram_used_bytes: int
+    ram_total_bytes: int
+    disk_used_bytes: int
+    disk_total_bytes: int
+    storage_mode: str
+    running_vps: int
+    stopped_vps: int
+    total_vps: int
+    max_total_vps: int
+    reserved_ram_gb: int
+    reserved_cpu: int
+    reserved_disk_gb: int
+
+
+@dataclass(frozen=True)
 class Instance:
     id: str
     guild_id: int

@@ -196,8 +196,9 @@ printf 'This bot is locked to server ID %s and will leave any other server.\n' "
 printf 'Invite it to that server (View Channels, Send Messages, Embed Links, Read Message History):\n'
 printf 'https://discord.com/oauth2/authorize?client_id=%s&scope=bot&permissions=84992&guild_id=%s&disable_guild_select=true\n\n' "$CLIENT_ID" "$GUILD_ID"
 printf 'In your server:  !deploy 1 1 1 @user   →   choose Ubuntu 24.04 / Debian 12   →   live progress meter\n'
+printf 'Host dashboard:  !status   →   admin-only live Host Node CPU/RAM/Disk/Fleet dashboard\n'
 printf 'Server hub:      !panel   →   post an interactive NOIR Cloud Panel (My VPS + Control in DM)\n'
-printf 'Server or DM:    !manage   →   Start/Stop/Reinstall (choose OS)/SSHX root terminal/Delete\n'
+printf 'Server or DM:    !manage   →   Start/Stop/Console/Stats/Reinstall/Refresh\n'
 printf 'Admin delete:    !delete @user   →   pick one VPS   →   confirm\n'
 printf 'Deploy is admin-only (server administrators or NOIR_ADMIN_IDS in %s).\n' "$ENV_FILE"
 printf 'Recommended: Developer Portal → Bot → turn OFF Public Bot.\n'
