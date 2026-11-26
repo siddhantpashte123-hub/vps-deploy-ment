@@ -7,11 +7,12 @@ import signal
 import subprocess
 import sys
 
-DIR = "/tmp/fier-sshx"
+DIR = "/tmp/noir-sshx"
 PID = DIR + "/sshx.pid"
 URL = DIR + "/session.url"
 ERR = DIR + "/session.err"
-VALID_ID = re.compile(r"fier-[a-f0-9]{12}\Z")
+# Legacy fier- IDs from pre-NOIR installs remain valid for existing VPSes.
+VALID_ID = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
 VALID_URL = re.compile(r"https://sshx\.io/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+\n?")
 
 
@@ -32,7 +33,7 @@ def read_pid() -> int:
 
 
 def start(instance_id: str) -> None:
-    if not VALID_ID.fullmatch(instance_id) or os.environ.get("FIER_VPS_ID") != instance_id:
+    if not VALID_ID.fullmatch(instance_id) or os.environ.get("NOIR_VPS_ID") != instance_id:
         raise SystemExit(1)
     pid = read_pid()
     if pid > 1 and alive(pid):
@@ -48,10 +49,10 @@ def start(instance_id: str) -> None:
         process = subprocess.Popen(
             ["/usr/local/bin/sshx", "--quiet", "--shell", "/bin/bash", "--name", instance_id],
             stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-            start_new_session=True, cwd="/home/fier",
+            start_new_session=True, cwd="/home/noir",
             env={
                 **os.environ,
-                "HOME": "/home/fier",
+                "HOME": "/home/noir",
                 "USER": "root",
                 "LOGNAME": "root",
                 "SHELL": "/bin/bash",

@@ -21,10 +21,11 @@ import subprocess
 import sys
 import tempfile
 
-STATE_ROOT = "/var/lib/fier"
+STATE_ROOT = "/var/lib/noir"
 DISKS = STATE_ROOT + "/disks"
 MOUNTS = STATE_ROOT + "/mounts"
-ID_RE = re.compile(r"fier-[a-f0-9]{12}\Z")
+# Legacy fier- IDs from pre-NOIR installs remain valid for existing disks.
+ID_RE = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
 MAX_GB = 256
 RESERVE_BYTES = 1024**3
 
@@ -167,7 +168,7 @@ def check() -> None:
     for binary in ("fallocate", "mkfs.ext4", "mount", "umount", "mountpoint", "truncate"):
         if not shutil.which(binary):
             fail("Missing required storage utility: " + binary)
-    pwd.getpwnam("fier")
+    pwd.getpwnam("noir")
     print("ok")
 
 
@@ -274,7 +275,7 @@ def main() -> None:
     if os.geteuid() != 0:
         fail("Helper must run as root.")
     if len(args) not in (2, 3) or args[0] not in {"create", "mount", "delete", "info", "probe"}:
-        fail("Usage: fier-volume create ID GB | mount ID | delete ID | info ID | probe ID | check ID")
+        fail("Usage: noir-volume create ID GB | mount ID | delete ID | info ID | probe ID | check ID")
     try:
         if args[0] == "create":
             if len(args) != 3:

@@ -7,10 +7,17 @@ import discord
 import pytest
 from discord.ext import commands
 
-from fier.bot import build_bot, mention_id, resolve_member
-from fier.errors import AccessDenied, UserError
-from fier.models import Actor, Instance, Specs, utc_now
-from fier.ui import ConfirmView, DeployOSView, ManageView, ReinstallOSView, UserDeleteView
+from noir.bot import build_bot, mention_id, resolve_member
+from noir.errors import AccessDenied, UserError
+from noir.models import Actor, Instance, Specs, utc_now
+from noir.ui import (
+    ConfirmView,
+    DeployOSView,
+    ManageView,
+    PanelHubView,
+    ReinstallOSView,
+    UserDeleteView,
+)
 
 TARGET_ID = 222333444555666777
 
@@ -157,7 +164,7 @@ async def test_deploy_uses_member_from_message_mentions(bot, guild, admin_member
 async def test_deploy_rejects_non_admin_even_with_legacy_deploy_role(
     bot, guild, actor, monkeypatch, backend
 ):
-    monkeypatch.setenv("FIER_DEPLOY_ROLE_ID", "42")
+    monkeypatch.setenv("NOIR_DEPLOY_ROLE_ID", "42")
     member = make_member(actor.user_id, guild)
     member.roles = [SimpleNamespace(id=42)]
     with pytest.raises(UserError, match="Only server administrators"):
@@ -250,18 +257,91 @@ async def test_delete_id_and_specs_only_open_confirmation(
     assert not any(event.startswith("remove:") for event in backend.events)
 
 
-async def test_guild_check_rejects_dms_and_other_guilds(settings, manager, backend, actor, guild):
+async def test_guild_check_rejects_other_guilds_and_strangers_in_dm(
+    settings, manager, backend, actor, guild, monkeypatch
+):
     restricted = build_bot(replace(settings, allowed_guild_id=actor.guild_id), manager, backend)
     member = make_member(actor.user_id, guild, admin=True)
-    with pytest.raises(commands.NoPrivateMessage):
-        await invoke(restricted, None, member, "deploy", "1 1 1")
     other_guild = SimpleNamespace(id=999, get_member=Mock(), fetch_member=AsyncMock())
     with pytest.raises(commands.CheckFailure, match="restricted"):
         await invoke(restricted, other_guild, member, "deploy", "1 1 1")
+    # In DMs, a user who is not in the locked server, not in NOIR_ADMIN_IDS, and owns
+    # no VPS in the store is rejected.
+    response = SimpleNamespace(status=404, reason="not found")
+    guild.get_member.return_value = None
+    guild.fetch_member = AsyncMock(side_effect=discord.NotFound(response, "not a member"))
+    monkeypatch.setattr(restricted, "locked_guild", lambda: guild)
+    stranger = Mock(spec=discord.User)
+    stranger.id = 777888999000111222
+    with pytest.raises(UserError, match="locked server"):
+        await invoke(restricted, None, stranger, "manage")
+
+
+async def test_dm_control_for_owner_and_admin(
+    settings, manager, backend, actor, guild, monkeypatch
+):
+    instance = await manager.deploy(actor, Specs(1, 1, 1), owner_id=TARGET_ID)
+    owner_member = make_member(TARGET_ID, guild, admin=False)
+    admin_member = make_member(actor.user_id, guild, admin=True)
+    guild.get_member = Mock(
+        side_effect=lambda uid: (
+            owner_member if uid == TARGET_ID else admin_member if uid == actor.user_id else None
+        )
+    )
+    bot = build_bot(settings, manager, backend)
+    monkeypatch.setattr(bot, "locked_guild", lambda: guild)
+
+    owner_user = Mock(spec=discord.User)
+    owner_user.id = TARGET_ID
+    ctx = await invoke(bot, None, owner_user, "manage")
+    view = ctx.send.call_args.kwargs["view"]
+    assert isinstance(view, ManageView)
+    assert view.in_dm is True
+    assert view.selected == instance.id
+    assert not any(getattr(c, "label", "") == "Open in DM" for c in view.children)
+    # Power control works from a DM interaction (guild_id=None).
+    dm_interaction = make_interaction(owner_user, None)
+    assert await view.interaction_check(dm_interaction)
+    await view.stop.callback(dm_interaction)
+    assert backend.items[instance.id]["status"] == "stopped"
+
+    # Admin can deploy for a server member from DMs.
+    admin_user = Mock(spec=discord.User)
+    admin_user.id = actor.user_id
+    deploy_ctx = await invoke(bot, None, admin_user, "deploy", f"1 1 1 <@{TARGET_ID}>")
+    deploy_view = deploy_ctx.send.call_args.kwargs["view"]
+    assert isinstance(deploy_view, DeployOSView)
+    assert deploy_view.owner_id == TARGET_ID
+    assert await deploy_view.interaction_check(make_interaction(admin_user, None))
+
+
+async def test_panel_hub_posts_card_and_sends_dm_console(
+    bot, guild, admin_member, manager, actor, monkeypatch
+):
+    instance = await manager.deploy(actor, Specs(2, 2, 5))
+    guild.name = "NOIR HQ"
+    guild.get_member.return_value = admin_member
+    monkeypatch.setattr(bot, "locked_guild", lambda: guild)
+    ctx = await invoke(bot, guild, admin_member, "panel")
+    embed = ctx.send.call_args.kwargs["embed"]
+    hub = ctx.send.call_args.kwargs["view"]
+    assert isinstance(hub, PanelHubView)
+    assert "Server Cloud Panel" in embed.title
+    assert "NOIR Utility" in embed.footer.text
+
+    dm_channel = SimpleNamespace(send=AsyncMock(return_value=SimpleNamespace(id=555)))
+    admin_member.create_dm = AsyncMock(return_value=dm_channel)
+    press = make_interaction(admin_member, actor.guild_id)
+    await hub.open_dm.callback(press)
+    dm_channel.send.assert_awaited_once()
+    sent_view = dm_channel.send.call_args.kwargs["view"]
+    assert isinstance(sent_view, ManageView)
+    assert sent_view.in_dm is True
+    assert sent_view.selected == instance.id
 
 
 def test_build_bot_requires_single_guild_lock(settings, manager, backend):
-    with pytest.raises(UserError, match="FIER_ALLOWED_GUILD_ID is required"):
+    with pytest.raises(UserError, match="NOIR_ALLOWED_GUILD_ID is required"):
         build_bot(replace(settings, allowed_guild_id=None), manager, backend)
 
 
@@ -429,7 +509,7 @@ async def test_user_delete_picker_paginates_over_25(bot, actor):
     now = utc_now()
     instances = [
         Instance(
-            f"fier-{index:012x}",
+            f"noir-{index:012x}",
             actor.guild_id,
             TARGET_ID,
             1,

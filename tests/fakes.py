@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from fier.models import Specs
-from fier.os_catalog import DEFAULT_OS
+from noir.models import Specs
+from noir.os_catalog import DEFAULT_OS
 
 
 class FakeBackend:

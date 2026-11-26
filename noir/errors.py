@@ -1,8 +1,8 @@
-class FierError(Exception):
+class NoirError(Exception):
     """Base error. Never include credentials or SSHX URLs in error messages."""
 
 
-class UserError(FierError):
+class UserError(NoirError):
     """An actionable, safe-to-display error."""
 
 
@@ -14,5 +14,5 @@ class NotFound(UserError):
     pass
 
 
-class BackendError(FierError):
+class BackendError(NoirError):
     """Infrastructure failure; details belong in operator logs, not Discord."""

@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from .errors import UserError
 from .os_catalog import DEFAULT_OS
 
-ID_PATTERN = re.compile(r"fier-[a-f0-9]{12}\Z")
+# New VPS IDs use the noir- prefix. Legacy fier- IDs from pre-NOIR installs
+# remain valid so existing VPSes keep working after the rename.
+ID_PATTERN = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
 STATUSES = {"provisioning", "running", "stopped", "reinstalling", "deleting", "error"}
 
 

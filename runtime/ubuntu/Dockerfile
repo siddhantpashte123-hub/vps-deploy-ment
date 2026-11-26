@@ -9,19 +9,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN userdel -r ubuntu 2>/dev/null || true; \
     groupdel ubuntu 2>/dev/null || true; \
-    groupadd --gid 1000 fier; \
-    useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash fier; \
-    usermod --home /home/fier --shell /bin/bash root; \
-    mkdir -p /home/fier; \
-    chown 1000:1000 /home/fier
+    groupadd --gid 1000 noir; \
+    useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash noir; \
+    usermod --home /home/noir --shell /bin/bash root; \
+    mkdir -p /home/noir; \
+    chown 1000:1000 /home/noir
 COPY sshx /usr/local/bin/sshx
-COPY fier-sshx /usr/local/bin/fier-sshx
-RUN chmod 0755 /usr/local/bin/sshx /usr/local/bin/fier-sshx
-ENV HOME=/home/fier \
+COPY noir-sshx /usr/local/bin/noir-sshx
+RUN chmod 0755 /usr/local/bin/sshx /usr/local/bin/noir-sshx
+ENV HOME=/home/noir \
     USER=root \
     LOGNAME=root \
-    NPM_CONFIG_PREFIX=/home/fier/.npm-global \
-    PATH=/home/fier/.npm-global/bin:/home/fier/.local/bin:$PATH
+    NPM_CONFIG_PREFIX=/home/noir/.npm-global \
+    PATH=/home/noir/.npm-global/bin:/home/noir/.local/bin:$PATH
 USER 0:0
-WORKDIR /home/fier
+WORKDIR /home/noir
 CMD ["/usr/bin/sleep", "infinity"]

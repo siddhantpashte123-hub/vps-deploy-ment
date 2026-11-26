@@ -1,18 +1,18 @@
 [Unit]
-Description=FIER Discord VPS Manager
+Description=NOIR Discord VPS Manager
 Wants=network-online.target docker.service
 After=network-online.target docker.service
 Requires=docker.service
 
 [Service]
 Type=simple
-User=fier
-Group=fier
+User=noir
+Group=noir
 SupplementaryGroups=docker
-WorkingDirectory=/opt/fier
-EnvironmentFile=/etc/fier/fier.env
+WorkingDirectory=/opt/noir
+EnvironmentFile=/etc/noir/noir.env
 Environment=PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/fier/.venv/bin/python -m fier run
+ExecStart=/opt/noir/.venv/bin/python -m noir run
 Restart=always
 RestartSec=5
 TimeoutStopSec=30
@@ -26,7 +26,7 @@ ProtectSystem=false
 ProtectHome=false
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=fier
+SyslogIdentifier=noir
 
 [Install]
 WantedBy=multi-user.target
