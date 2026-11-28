@@ -65,6 +65,9 @@ def error_text(exc: Exception) -> str:
     if isinstance(exc, UserError):
         return str(exc)
     if isinstance(exc, NoirError):
+        msg = str(exc).strip()
+        if msg and len(msg) <= 240:
+            return msg
         return (
             "The host could not complete that action. Try again or contact the host administrator."
         )
@@ -1122,6 +1125,44 @@ class ConfirmView(discord.ui.View):
             if self.action == "delete":
                 await self.manager.delete(self.actor, self.instance.id)
                 text = "VPS deleted."
+                if self.parent_view is not None and self.parent_view.message is not None:
+                    self.parent_view.instances = [
+                        i
+                        for i in self.parent_view.instances
+                        if i.id != self.instance.id
+                    ]
+                    self.parent_view.selected = (
+                        self.parent_view.instances[0].id
+                        if self.parent_view.instances
+                        else None
+                    )
+                    next_inst = self.parent_view.current()
+                    live = (
+                        await self.manager.stats(self.actor, next_inst.id)
+                        if next_inst is not None
+                        else None
+                    )
+                    replacement = ManageView(
+                        self.bot,
+                        self.actor,
+                        self.parent_view.instances,
+                        self.parent_view.selected,
+                        in_dm=self.parent_view.in_dm,
+                    )
+                    replacement.message = self.parent_view.message
+                    try:
+                        await self.parent_view.message.edit(
+                            embed=instance_embed(
+                                next_inst, live, index=replacement.current_index()
+                            )
+                            if next_inst is not None
+                            else empty_embed(),
+                            attachments=[],
+                            view=replacement,
+                        )
+                    except discord.HTTPException:
+                        pass
+                    self.parent_view.stop()
                 if self.bot is not None and hasattr(self.bot, "audit_log"):
                     await self.bot.audit_log(
                         "VPS Deleted",
@@ -1147,14 +1188,18 @@ class ConfirmView(discord.ui.View):
                 if self.parent_view is not None:
                     self.parent_view._replace_instance(instance)
                     self.parent_view._sync_button_states()
-                    live = await self.manager.stats(self.actor, instance.id)
-                    await self.parent_view._edit_panel(
-                        interaction,
-                        instance_embed(
-                            instance, live, index=self.parent_view.current_index()
-                        ),
-                        self.parent_view,
-                    )
+                    if self.parent_view.message is not None:
+                        live = await self.manager.stats(self.actor, instance.id)
+                        try:
+                            await self.parent_view.message.edit(
+                                embed=instance_embed(
+                                    instance, live, index=self.parent_view.current_index()
+                                ),
+                                attachments=[],
+                                view=self.parent_view,
+                            )
+                        except discord.HTTPException:
+                            pass
                 if self.bot is not None and hasattr(self.bot, "audit_log"):
                     await self.bot.audit_log(
                         "Backup Snapshot Deleted",
@@ -1714,7 +1759,9 @@ class ManageView(discord.ui.View):
         except Exception as exc:
             await interaction.response.send_message(error_text(exc), ephemeral=True)
             return
-        view = ConfirmView(self.manager, self.actor, instance, "delete", bot=self.bot)
+        view = ConfirmView(
+            self.manager, self.actor, instance, "delete", bot=self.bot, parent_view=self
+        )
         await interaction.response.send_message(
             embed=confirm_embed(instance, "delete"),
             view=view,

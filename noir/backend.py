@@ -436,7 +436,13 @@ class DockerBackend:
         container = self.get(instance_id)
         if container is not None:
             try:
+                container.stop(timeout=3)
+            except (DockerException, OSError):
+                pass
+            try:
                 container.remove(force=True, v=True)
+            except DockerNotFound:
+                pass
             except (DockerException, OSError) as exc:
                 raise BackendError("Docker could not remove the container.") from exc
         self._helper("delete", instance_id)
@@ -474,10 +480,42 @@ class DockerBackend:
     def close_sshx(self, instance_id: str) -> None:
         self._exec(instance_id, ["/usr/local/bin/noir-sshx", "stop"])
 
-    def pinggy_ssh(self, instance_id: str) -> PinggySSHSession:
-        code, _ = self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "start", instance_id])
+    def _ensure_pinggy_helper(self, instance_id: str) -> None:
+        """Install /usr/local/bin/noir-pinggy on older containers if not yet present."""
+        code, _ = self._exec(
+            instance_id, ["test", "-x", "/usr/local/bin/noir-pinggy"]
+        )
+        if code == 0:
+            return
+        import base64
+        from pathlib import Path
+
+        helper_src = Path(__file__).resolve().parent.parent / "runtime" / "noir-pinggy"
+        if not helper_src.is_file():
+            raise UserError(
+                "Pinggy helper missing on host. Re-run `install.sh` with `NOIR_REPAIR=1`."
+            )
+        b64 = base64.b64encode(helper_src.read_bytes()).decode("ascii")
+        install_cmd = (
+            f"printf '%s' '{b64}' | base64 -d > /usr/local/bin/noir-pinggy && "
+            "chmod 0755 /usr/local/bin/noir-pinggy"
+        )
+        shell = "/bin/bash"
+        c2, _ = self._exec(instance_id, ["test", "-x", "/bin/bash"])
+        if c2 != 0:
+            shell = "/bin/sh"
+        code, out = self._exec(instance_id, [shell, "-c", install_cmd])
         if code != 0:
-            raise BackendError("Pinggy SSH tunnel could not start inside the VPS.")
+            raise UserError(f"Could not provision Pinggy helper inside VPS: {out[:160]}")
+
+    def pinggy_ssh(self, instance_id: str) -> PinggySSHSession:
+        self._ensure_pinggy_helper(instance_id)
+        code, out = self._exec(
+            instance_id, ["/usr/local/bin/noir-pinggy", "start", instance_id]
+        )
+        if code != 0:
+            detail = out.strip()[:180] or "sshd or outbound tunnel could not start"
+            raise UserError(f"Pinggy SSH could not start inside the VPS ({detail}).")
         for _ in range(30):
             code, output = self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "info"])
             if code == 0:
@@ -486,20 +524,27 @@ class DockerBackend:
                     return PinggySSHSession(
                         host=lines[0], port=int(lines[1]), password=lines[2]
                     )
+            elif code == 2 and "EXIT:" in output:
+                reason = output.split("EXIT:", 1)[-1].strip()[:180]
+                raise UserError(
+                    f"Pinggy SSH connection closed early: `{reason or 'check outbound port 443'}`"
+                )
             time.sleep(1)
-        raise BackendError(
-            "Pinggy did not return an SSH tunnel within 30 seconds. Check outbound port 443."
+        raise UserError(
+            "Pinggy did not return an SSH address within 30s. Ensure outbound TCP port 443 is open."
         )
 
     def close_pinggy_ssh(self, instance_id: str) -> None:
         self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "stop"])
 
     def pinggy_http(self, instance_id: str, port: int) -> str:
-        code, _ = self._exec(
+        self._ensure_pinggy_helper(instance_id)
+        code, out = self._exec(
             instance_id, ["/usr/local/bin/noir-pinggy", "http-start", instance_id, str(port)]
         )
         if code != 0:
-            raise BackendError("Pinggy HTTPS tunnel could not start inside the VPS.")
+            detail = out.strip()[:180] or "tunnel process failed to spawn"
+            raise UserError(f"Pinggy HTTPS tunnel could not start ({detail}).")
         for _ in range(30):
             code, output = self._exec(
                 instance_id, ["/usr/local/bin/noir-pinggy", "http-url", str(port)]
@@ -507,9 +552,14 @@ class DockerBackend:
             url = output.strip()
             if code == 0 and url.startswith("https://"):
                 return url
+            if code == 2 and "EXIT:" in output:
+                reason = output.split("EXIT:", 1)[-1].strip()[:180]
+                raise UserError(
+                    f"Pinggy HTTPS tunnel closed early: `{reason or 'check outbound port 443'}`"
+                )
             time.sleep(1)
-        raise BackendError(
-            "Pinggy did not return an HTTPS URL within 30 seconds. Check outbound port 443."
+        raise UserError(
+            "Pinggy did not return an HTTPS URL within 30s. Ensure outbound TCP port 443 is open."
         )
 
     def close_pinggy_http(self, instance_id: str, port: int) -> None:
