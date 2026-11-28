@@ -17,6 +17,7 @@ OS_CHOICES: tuple[OSChoice, ...] = (
     OSChoice("ubuntu-24.04", "Ubuntu 24.04 LTS", "ubuntu:24.04", "🟠"),
     OSChoice("ubuntu-22.04", "Ubuntu 22.04 LTS", "ubuntu:22.04", "🟡"),
     OSChoice("debian-12", "Debian 12 (bookworm)", "debian:12", "🌀"),
+    OSChoice("alpine-3.20", "Alpine Linux 3.20", "alpine:3.20", "🏔️"),
 )
 DEFAULT_OS = "ubuntu-24.04"
 _BY_ID = {choice.id: choice for choice in OS_CHOICES}

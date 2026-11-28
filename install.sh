@@ -41,7 +41,8 @@ systemctl is-active --quiet docker || die "Docker did not start."
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ ! -f "$SOURCE_DIR/noir/cli.py" || ! -f "$SOURCE_DIR/runtime/ubuntu/Dockerfile" \
-  || ! -f "$SOURCE_DIR/runtime/ubuntu22/Dockerfile" || ! -f "$SOURCE_DIR/runtime/debian/Dockerfile" ]]; then
+  || ! -f "$SOURCE_DIR/runtime/ubuntu22/Dockerfile" || ! -f "$SOURCE_DIR/runtime/debian/Dockerfile" \
+  || ! -f "$SOURCE_DIR/runtime/alpine/Dockerfile" ]]; then
   say "Downloading NOIR from GitHub ($REF)"
   ARCHIVE="$TMP_DIR/source.tar.gz"
   curl --fail --location --retry 3 --connect-timeout 20 \
@@ -133,12 +134,13 @@ python3 -m venv "$APP_DIR/.venv"
 # must be able to traverse/read the root-owned application and virtualenv.
 chmod -R a+rX "$APP_DIR"
 
-say "Building the Ubuntu 24.04, Ubuntu 22.04 and Debian 12 VPS images (first run may take a few minutes)"
+say "Building Ubuntu 24.04, Ubuntu 22.04, Debian 12 and Alpine 3.20 VPS images"
 cd "$APP_DIR"
 "$APP_DIR/.venv/bin/python" scripts/fetch_sshx.py --output runtime/sshx
 docker build --pull -t noir-vps:local -f runtime/ubuntu/Dockerfile runtime
 docker build --pull -t noir-vps:ubuntu-22.04 -f runtime/ubuntu22/Dockerfile runtime
 docker build --pull -t noir-vps:debian-12 -f runtime/debian/Dockerfile runtime
+docker build --pull -t noir-vps:alpine-3.20 -f runtime/alpine/Dockerfile runtime
 install -o root -g root -m 0755 scripts/noir-volume /usr/local/libexec/noir-volume
 SUDOERS="$TMP_DIR/noir.sudoers"
 printf 'noir ALL=(root) NOPASSWD: /usr/local/libexec/noir-volume\n' > "$SUDOERS"
@@ -155,6 +157,12 @@ fi
 "$APP_DIR/.venv/bin/python" -m noir "${SETUP_ARGS[@]}"
 chmod 0600 "$ENV_FILE"
 chown root:root "$ENV_FILE"
+if ! grep -q '^NOIR_PUBLIC_IP=' "$ENV_FILE" 2>/dev/null; then
+  PUB_IP="$(curl -4 -fsSL --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  if [[ "$PUB_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf '\nNOIR_PUBLIC_IP=%s\n' "$PUB_IP" >> "$ENV_FILE"
+  fi
+fi
 "$APP_DIR/.venv/bin/python" -m noir doctor --env-file "$ENV_FILE"
 
 say "Upgrading existing VPS containers to the root runtime (home files are preserved)"
@@ -197,12 +205,13 @@ say "NOIR is online"
 printf 'This bot is locked to server ID %s and will leave any other server.\n' "$GUILD_ID"
 printf 'Invite it to that server (View Channels, Send Messages, Embed Links, Read Message History):\n'
 printf 'https://discord.com/oauth2/authorize?client_id=%s&scope=bot&permissions=84992&guild_id=%s&disable_guild_select=true\n\n' "$CLIENT_ID" "$GUILD_ID"
-printf 'In your server:  !deploy 1 1 1 @user [30d]   →   choose Ubuntu 24.04 / Ubuntu 22.04 / Debian 12\n'
+printf 'In your server:  !deploy 1 1 1 @user [30d]   →   Ubuntu 24.04 / 22.04 / Debian 12 / Alpine 3.20\n'
+printf 'Promo codes:     !gencode 1 1 2 30d 5        →   members claim via !redeem <CODE> or /redeem\n'
 printf 'Host dashboard:  !status   →   admin-only live Host Node CPU/RAM/Disk/Fleet dashboard\n'
 printf 'Fleet browser:   !list [@user]   →   paginated admin VPS browser & quick manage\n'
 printf 'Admin controls:  !suspend <id> [reason] • !unsuspend <id> • !resize <id> RAM CPU DISK • !renew <id> 30d\n'
 printf 'Server hub:      !panel   →   post an interactive NOIR Cloud Panel (My VPS + Control in DM)\n'
-printf 'Server or DM:    !manage   →   Start/Stop/Restart/Console/Backup/Restore/Reinstall\n'
+printf 'Server or DM:    !manage   →   Start/Stop/Restart/Console/Ports/Rename/Logs/Templates/Backup/Restore\n'
 printf 'Admin delete:    !delete @user   →   pick one VPS   →   confirm\n'
 printf 'Deploy is admin-only (server administrators or NOIR_ADMIN_IDS in %s).\n' "$ENV_FILE"
 printf 'Recommended: Developer Portal → Bot → turn OFF Public Bot.\n'

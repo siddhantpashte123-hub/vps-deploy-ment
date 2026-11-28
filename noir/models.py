@@ -11,6 +11,8 @@ from .os_catalog import DEFAULT_OS
 # remain valid so existing VPSes keep working after the rename.
 ID_PATTERN = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
 DURATION_RE = re.compile(r"([1-9][0-9]{0,3})([smhdw])\Z", re.IGNORECASE)
+CODE_PATTERN = re.compile(r"NOIR-[A-Z0-9]{4}-[A-Z0-9]{4}\Z", re.IGNORECASE)
+NAME_CLEAN_RE = re.compile(r"[^\w .+\-]", re.UNICODE)
 STATUSES = {
     "provisioning",
     "running",
@@ -24,6 +26,38 @@ STATUSES = {
 
 def valid_id(value: str) -> bool:
     return isinstance(value, str) and bool(ID_PATTERN.fullmatch(value))
+
+
+def clean_vps_name(raw: str | None) -> str | None:
+    if raw is None:
+        return None
+    cleaned = NAME_CLEAN_RE.sub("", raw.strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return None
+    if len(cleaned) > 28:
+        raise UserError("VPS nickname must be 28 characters or fewer.")
+    return cleaned
+
+
+def validate_ssh_pubkey(raw: str) -> str:
+    line = raw.strip()
+    if "\n" in line or "\r" in line or len(line) > 2048:
+        raise UserError("Paste a single-line SSH public key (`ssh-ed25519 ...` or `ssh-rsa ...`).")
+    parts = line.split()
+    allowed_prefixes = (
+        "ssh-ed25519",
+        "ssh-rsa",
+        "ecdsa-sha2-nistp256",
+        "ecdsa-sha2-nistp384",
+        "ecdsa-sha2-nistp521",
+        "sk-ssh-ed25519@openssh.com",
+    )
+    if len(parts) < 2 or parts[0] not in allowed_prefixes:
+        raise UserError("Invalid SSH public key. Expected `ssh-ed25519` or `ssh-rsa` public key.")
+    if not re.fullmatch(r"[A-Za-z0-9+/=]+", parts[1]):
+        raise UserError("SSH public key payload is malformed.")
+    return " ".join(parts[:3])
 
 
 def utc_now() -> str:
@@ -143,6 +177,9 @@ class Instance:
     expires_at: str | None = None
     suspended_reason: str | None = None
     backup_at: str | None = None
+    name: str | None = None
+    warned_24h: int = 0
+    warned_1h: int = 0
 
     @property
     def is_suspended(self) -> bool:
@@ -158,4 +195,63 @@ class Instance:
         data = dict(row)  # type: ignore[arg-type]
         data["guild_id"] = int(data["guild_id"])
         data["owner_id"] = int(data["owner_id"])
+        data["warned_24h"] = int(data.get("warned_24h") or 0)
+        data["warned_1h"] = int(data.get("warned_1h") or 0)
         return cls(**data)
+
+
+@dataclass(frozen=True)
+class PortMapping:
+    host_port: int
+    instance_id: str
+    container_port: int
+    created_at: str
+
+    @classmethod
+    def from_row(cls, row: object) -> PortMapping:
+        data = dict(row)  # type: ignore[arg-type]
+        return cls(
+            host_port=int(data["host_port"]),
+            instance_id=str(data["instance_id"]),
+            container_port=int(data["container_port"]),
+            created_at=str(data["created_at"]),
+        )
+
+
+@dataclass(frozen=True)
+class RedeemCode:
+    code: str
+    guild_id: int
+    ram_gb: int
+    cpu: int
+    disk_gb: int
+    duration_seconds: int | None
+    max_uses: int
+    uses: int
+    created_by: int
+    created_at: str
+
+    @property
+    def specs(self) -> Specs:
+        return Specs(self.ram_gb, self.cpu, self.disk_gb)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.max_uses - self.uses)
+
+    @classmethod
+    def from_row(cls, row: object) -> RedeemCode:
+        data = dict(row)  # type: ignore[arg-type]
+        dur = data.get("duration_seconds")
+        return cls(
+            code=str(data["code"]),
+            guild_id=int(data["guild_id"]),
+            ram_gb=int(data["ram_gb"]),
+            cpu=int(data["cpu"]),
+            disk_gb=int(data["disk_gb"]),
+            duration_seconds=int(dur) if dur is not None else None,
+            max_uses=int(data["max_uses"]),
+            uses=int(data["uses"]),
+            created_by=int(data["created_by"]),
+            created_at=str(data["created_at"]),
+        )

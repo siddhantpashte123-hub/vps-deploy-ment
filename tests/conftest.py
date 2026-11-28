@@ -22,6 +22,7 @@ def settings(tmp_path: Path) -> Settings:
             "ubuntu-24.04": "noir-vps:local",
             "ubuntu-22.04": "noir-vps:ubuntu-22.04",
             "debian-12": "noir-vps:debian-12",
+            "alpine-3.20": "noir-vps:alpine-3.20",
         },
         network="noir-vps",
         volume_helper=Path("/usr/local/libexec/noir-volume"),
