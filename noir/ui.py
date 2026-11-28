@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -62,6 +63,11 @@ DEPLOY_STAGES = [
 
 
 def error_text(exc: Exception) -> str:
+    if isinstance(exc, asyncio.TimeoutError):
+        return (
+            "That operation timed out (45s). Check if another tunnel/backup task is still "
+            "running on this VPS, or run `sudo systemctl restart noir` on the host."
+        )
     if isinstance(exc, UserError):
         return str(exc)
     if isinstance(exc, NoirError):
@@ -1123,7 +1129,9 @@ class ConfirmView(discord.ui.View):
         ok = True
         try:
             if self.action == "delete":
-                await self.manager.delete(self.actor, self.instance.id)
+                await asyncio.wait_for(
+                    self.manager.delete(self.actor, self.instance.id), timeout=45
+                )
                 text = "VPS deleted."
                 if self.parent_view is not None and self.parent_view.message is not None:
                     self.parent_view.instances = [
@@ -1900,7 +1908,9 @@ class ConsoleChoiceView(discord.ui.View):
     async def open_ssh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         try:
-            instance, session = await self.manager.pinggy_ssh(self.actor, self.instance.id)
+            instance, session = await asyncio.wait_for(
+                self.manager.pinggy_ssh(self.actor, self.instance.id), timeout=40
+            )
             self.stop()
             ssh_view = PinggySSHView(self.manager, self.actor, instance, session)
             await interaction.edit_original_response(
@@ -1924,7 +1934,9 @@ class ConsoleChoiceView(discord.ui.View):
     async def open_sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         try:
-            instance, url = await self.manager.sshx(self.actor, self.instance.id)
+            instance, url = await asyncio.wait_for(
+                self.manager.sshx(self.actor, self.instance.id), timeout=40
+            )
             self.stop()
             sshx_view = SSHXView(self.manager, self.actor, instance.id, url, instance=instance)
             await interaction.edit_original_response(
