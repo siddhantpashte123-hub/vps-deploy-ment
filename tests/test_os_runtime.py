@@ -116,12 +116,15 @@ def test_runtime_dockerfiles_and_installer_build_all_contexts():
         assert text.splitlines()[0] == f"FROM {choice.base_image}"
         assert "COPY sshx /usr/local/bin/sshx" in text
         assert "COPY noir-sshx /usr/local/bin/noir-sshx" in text
+        assert "COPY noir-pinggy /usr/local/bin/noir-pinggy" in text
+        assert "openssh-server" in text
         assert "USER 0:0" in text
         assert (
             f"docker build --pull -t {tag} -f runtime/{directory}/Dockerfile runtime" in installer
         )
         assert f"$SOURCE_DIR/runtime/{directory}/Dockerfile" in installer
     assert (ROOT / "runtime" / "noir-sshx").is_file()
+    assert (ROOT / "runtime" / "noir-pinggy").is_file()
     assert (ROOT / "assets" / "noir-banner.png").is_file()
     assert not (ROOT / "assets" / "fier-banner.png").exists()
     assert "NOIR_ALLOWED_GUILD_ID" in installer

@@ -15,7 +15,7 @@ from docker.types import LogConfig, Mount, Ulimit
 
 from .config import Settings
 from .errors import BackendError, UserError
-from .models import LiveStats, Specs, valid_id
+from .models import LiveStats, PinggySSHSession, Specs, valid_id
 from .os_catalog import DEFAULT_OS, os_label
 
 log = logging.getLogger(__name__)
@@ -471,6 +471,65 @@ class DockerBackend:
     def close_sshx(self, instance_id: str) -> None:
         self._exec(instance_id, ["/usr/local/bin/noir-sshx", "stop"])
 
+    def pinggy_ssh(self, instance_id: str) -> PinggySSHSession:
+        code, _ = self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "start", instance_id])
+        if code != 0:
+            raise BackendError("Pinggy SSH tunnel could not start inside the VPS.")
+        for _ in range(30):
+            code, output = self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "info"])
+            if code == 0:
+                lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
+                if len(lines) >= 3 and lines[1].isdigit():
+                    return PinggySSHSession(
+                        host=lines[0], port=int(lines[1]), password=lines[2]
+                    )
+            time.sleep(1)
+        raise BackendError(
+            "Pinggy did not return an SSH tunnel within 30 seconds. Check outbound port 443."
+        )
+
+    def close_pinggy_ssh(self, instance_id: str) -> None:
+        self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "stop"])
+
+    def pinggy_http(self, instance_id: str, port: int) -> str:
+        code, _ = self._exec(
+            instance_id, ["/usr/local/bin/noir-pinggy", "http-start", instance_id, str(port)]
+        )
+        if code != 0:
+            raise BackendError("Pinggy HTTPS tunnel could not start inside the VPS.")
+        for _ in range(30):
+            code, output = self._exec(
+                instance_id, ["/usr/local/bin/noir-pinggy", "http-url", str(port)]
+            )
+            url = output.strip()
+            if code == 0 and url.startswith("https://"):
+                return url
+            time.sleep(1)
+        raise BackendError(
+            "Pinggy did not return an HTTPS URL within 30 seconds. Check outbound port 443."
+        )
+
+    def close_pinggy_http(self, instance_id: str, port: int) -> None:
+        self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "http-stop", str(port)])
+
+    def set_network_lock(self, instance_id: str, locked: bool) -> None:
+        container = self.get(instance_id)
+        if container is None:
+            raise UserError("The container is missing. Reinstall this VPS to recreate it.")
+        try:
+            networks = self.client.networks.list(names=[self.settings.network])
+            net = next((n for n in networks if n.name == self.settings.network), None)
+            if net is None:
+                raise BackendError("Managed Docker network was not found.")
+            net.reload()
+            attached = {c.id for c in net.containers}
+            if locked and container.id in attached:
+                net.disconnect(container, force=True)
+            elif not locked and container.id not in attached:
+                net.connect(container)
+        except (DockerException, OSError) as exc:
+            raise BackendError("Could not update container network state.") from exc
+
     def exec_command(self, instance_id: str, shell_cmd: str) -> tuple[int, str]:
         container = self.get(instance_id)
         if container is None or container.status != "running":
@@ -499,9 +558,11 @@ class DockerBackend:
 
         quoted = shlex.quote(pubkey)
         script = (
-            "mkdir -p /home/noir/.ssh && chmod 700 /home/noir/.ssh && "
+            "mkdir -p /home/noir/.ssh /root/.ssh && "
+            "chmod 700 /home/noir/.ssh /root/.ssh && "
             f"printf '%s\\n' {quoted} > /home/noir/.ssh/authorized_keys && "
-            "chmod 600 /home/noir/.ssh/authorized_keys"
+            f"printf '%s\\n' {quoted} > /root/.ssh/authorized_keys && "
+            "chmod 600 /home/noir/.ssh/authorized_keys /root/.ssh/authorized_keys"
         )
         self._exec(instance_id, ["/bin/bash", "-lc", script])
 

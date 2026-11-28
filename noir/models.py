@@ -180,6 +180,8 @@ class Instance:
     name: str | None = None
     warned_24h: int = 0
     warned_1h: int = 0
+    autobackup: int = 0
+    net_locked: int = 0
 
     @property
     def is_suspended(self) -> bool:
@@ -197,7 +199,20 @@ class Instance:
         data["owner_id"] = int(data["owner_id"])
         data["warned_24h"] = int(data.get("warned_24h") or 0)
         data["warned_1h"] = int(data.get("warned_1h") or 0)
+        data["autobackup"] = int(data.get("autobackup") or 0)
+        data["net_locked"] = int(data.get("net_locked") or 0)
         return cls(**data)
+
+
+@dataclass(frozen=True)
+class PinggySSHSession:
+    host: str
+    port: int
+    password: str
+
+    @property
+    def command(self) -> str:
+        return f"ssh -p {self.port} root@{self.host}"
 
 
 @dataclass(frozen=True)

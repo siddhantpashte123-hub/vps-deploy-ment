@@ -386,3 +386,36 @@ async def test_rename_sshkey_exec_logs_templates_and_expiry_warnings(
     alerts = await manager.sweep_expiry_warnings()
     assert [(i.id, win) for i, win in alerts] == [(inst.id, "1h")]
     assert await manager.sweep_expiry_warnings() == []
+
+
+async def test_pinggy_ssh_subusers_autobackup_sweep_and_gitdeploy_validation(
+    manager, actor, member_actor, backend, store
+):
+    inst = await manager.deploy(actor, Specs(1, 1, 2), owner_id=member_actor.user_id)
+
+    # Pinggy SSH session & close
+    _, session = await manager.pinggy_ssh(member_actor, inst.id)
+    assert session.command == f"ssh -p {session.port} root@{session.host}"
+    await manager.close_pinggy_ssh(member_actor, inst.id)
+    assert f"close-pinggy-ssh:{inst.id}" in backend.events
+
+    # Sub-user sharing: sub-user sees shared VPS in manager.list(), cannot delete
+    sub_actor = Actor(888999000, actor.guild_id, False)
+    await manager.share_vps(member_actor, inst.id, sub_actor.user_id)
+    visible = await manager.list(sub_actor)
+    assert [i.id for i in visible] == [inst.id]
+    from noir.errors import AccessDenied
+
+    with pytest.raises(AccessDenied):
+        await manager.delete(sub_actor, inst.id)
+
+    # Scheduled auto-backup sweep runs once when due, skips until 24h elapses
+    await manager.set_autobackup(member_actor, inst.id, True)
+    saved = await manager.sweep_autobackups()
+    assert [i.id for i in saved] == [inst.id]
+    assert await manager.sweep_autobackups() == []
+
+    # Git deploy rejects non-GitHub / shell-injection URLs
+    with pytest.raises(UserError, match="HTTPS GitHub repository URL"):
+        await manager.git_deploy(member_actor, inst.id, "http://evil.local/repo;rm -rf /")
+

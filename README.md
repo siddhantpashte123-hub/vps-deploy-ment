@@ -12,14 +12,22 @@ Admin-created Ubuntu 24.04 / Ubuntu 22.04 / Debian 12 / Alpine 3.20 development 
 !unsuspend <id>                 admin only: unlock & start a suspended VPS
 !resize <id> RAM CPU DISK       admin only: live plan upgrade without wiping /home/noir
 !renew <id> <30d|never>         admin only: extend or clear automatic expiry timer
+!netlock <id> <on|off>          admin only: isolate/restore outbound container networking
+!maintenance <on|off> [reason]  admin only: pause non-admin operations during host maintenance
+!announce <message>             admin only: broadcast an official DM notice to all VPS owners
 !panel                          admin only: post an interactive NOIR Cloud Panel hub card
 !delete @user                   admin only: pick one of that member's VPSes, then confirm
-!manage                         server or DMs: Start · Stop · Restart · Console · Ports · Rename · Logs · Templates · Backup · Restore
+!manage                         server or DMs: Console (SSH + SSHX) · Tunnel · Ports · Rename · Logs · Templates · Backup · Restore
+!ssh [id]                       owner/sub-user: direct Pinggy.io TCP root SSH tunnel + credentials
+!tunnel <id> <port>             owner/sub-user: expose any container HTTP port as a public HTTPS URL (Pinggy.io)
+!share <id> @user / !unshare    owner or admin: grant/revoke teammate sub-user access
+!autobackup <id> <on|off>       owner or admin: automatic 24-hour /home/noir snapshots
+!gitdeploy <id> <github_url>    owner or admin: clone/pull a GitHub repo & install dependencies
 !port add <id> <port>           owner or admin: forward a public host TCP port to your container
 !rename <id> <name>             owner or admin: set a custom nickname for your VPS
-!exec <id> <cmd> / !logs <id>   owner or admin: quick command exec or active process/port snapshot
-!template <id> [template]       owner or admin: 1-click Discord.py / Node.js / FastAPI / Express starter
-!sshkey <pubkey|clear>          owner: sync your SSH public key to /home/noir/.ssh/authorized_keys
+!exec <id> <cmd> / !logs <id>   owner or sub-user: quick command exec or active process/port snapshot
+!template <id> [template]       owner or sub-user: 1-click Discord.py / Node.js / FastAPI / Express starter
+!sshkey <pubkey|clear>          owner: sync your SSH public key to /root/.ssh & /home/noir/.ssh
 !transfer <id> @user            owner or admin: transfer VPS ownership to another member
 ```
 
@@ -90,7 +98,8 @@ The management panel has:
 | **Start** | Start the existing container and refresh live metrics in-place; files are preserved. |
 | **Stop** | Stop processes and update the card in-place; the home disk is preserved. |
 | **Restart** | Cleanly restart the container in-place without losing `/home/noir` files. |
-| **Console** | Open a real browser terminal through `sshx.io` as **root inside the VPS container**; the capability link is sent only to you as an ephemeral Discord response. |
+| **Console** | Opens a 2-option selector: **SSH** (direct TCP root SSH tunnel via `free.pinggy.io` with `ssh -p <port> root@<host>`, password & SFTP/VS Code support) or **SSHX** (instant private web terminal via `sshx.io`). |
+| **Tunnel** | Expose any HTTP web server port inside your container as an instant `https://*.pinggy.link` URL via Pinggy.io. |
 | **Stats** | Refresh live container uptime, CPU %, RAM MB, and `/home/noir` disk usage in-place. |
 | **Backup** | Save a compressed `.tar.gz` snapshot of `/home/noir` on the host. |
 | **Restore** | Confirm first, then restore `/home/noir` from your latest saved snapshot. |

@@ -40,7 +40,8 @@ systemctl enable --now docker
 systemctl is-active --quiet docker || die "Docker did not start."
 
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ ! -f "$SOURCE_DIR/noir/cli.py" || ! -f "$SOURCE_DIR/runtime/ubuntu/Dockerfile" \
+if [[ ! -f "$SOURCE_DIR/noir/cli.py" || ! -f "$SOURCE_DIR/runtime/noir-pinggy" \
+  || ! -f "$SOURCE_DIR/runtime/ubuntu/Dockerfile" \
   || ! -f "$SOURCE_DIR/runtime/ubuntu22/Dockerfile" || ! -f "$SOURCE_DIR/runtime/debian/Dockerfile" \
   || ! -f "$SOURCE_DIR/runtime/alpine/Dockerfile" ]]; then
   say "Downloading NOIR from GitHub ($REF)"
@@ -211,8 +212,9 @@ printf 'Host dashboard:  !status   →   admin-only live Host Node CPU/RAM/Disk/
 printf 'Fleet browser:   !list [@user]   →   paginated admin VPS browser & quick manage\n'
 printf 'Admin controls:  !suspend <id> [reason] • !unsuspend <id> • !resize <id> RAM CPU DISK • !renew <id> 30d\n'
 printf 'Server hub:      !panel   →   post an interactive NOIR Cloud Panel (My VPS + Control in DM)\n'
-printf 'Server or DM:    !manage   →   Start/Stop/Restart/Console/Ports/Rename/Logs/Templates/Backup/Restore\n'
-printf 'Admin delete:    !delete @user   →   pick one VPS   →   confirm\n'
+printf 'Server or DM:    !manage  →   Console (SSH via Pinggy.io + SSHX) / Tunnel / Ports / Templates / Backup\n'
+printf 'Team & Git:      !share <id> @user • !tunnel <id> <port> • !gitdeploy <id> <github_url> • !autobackup <id> on\n'
+printf 'Admin ops:       !maintenance on [reason] • !announce <msg> • !netlock <id> on • !delete @user\n'
 printf 'Deploy is admin-only (server administrators or NOIR_ADMIN_IDS in %s).\n' "$ENV_FILE"
 printf 'Recommended: Developer Portal → Bot → turn OFF Public Bot.\n'
 printf 'Logs:     journalctl -u noir -f\nRestart:  systemctl restart noir\nStatus:   systemctl status noir\n'

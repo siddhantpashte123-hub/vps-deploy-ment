@@ -1,6 +1,6 @@
 FROM alpine:3.20
 RUN apk add --no-cache \
-    bash ca-certificates curl wget git openssh-client sudo shadow \
+    bash ca-certificates curl wget git openssh-client openssh-server sudo shadow \
     python3 py3-pip nodejs npm build-base \
     nano vim procps psmisc htop tmux \
     iproute2 iputils bind-tools unzip zip jq
@@ -11,7 +11,8 @@ RUN addgroup -g 1000 noir; \
     chown 1000:1000 /home/noir
 COPY sshx /usr/local/bin/sshx
 COPY noir-sshx /usr/local/bin/noir-sshx
-RUN chmod 0755 /usr/local/bin/sshx /usr/local/bin/noir-sshx
+COPY noir-pinggy /usr/local/bin/noir-pinggy
+RUN chmod 0755 /usr/local/bin/sshx /usr/local/bin/noir-sshx /usr/local/bin/noir-pinggy
 ENV HOME=/home/noir \
     USER=root \
     LOGNAME=root \
