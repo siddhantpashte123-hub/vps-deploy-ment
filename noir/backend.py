@@ -462,18 +462,103 @@ class DockerBackend:
         except (DockerException, OSError) as exc:
             raise BackendError("Could not run the terminal helper inside the VPS.") from exc
 
+    def _sync_runtime_script(
+        self, instance_id: str, script_name: str, container_dest: str
+    ) -> None:
+        """Keep an in-container helper script synced with the host runtime copy."""
+        import base64
+        import hashlib
+        from pathlib import Path
+
+        helper_src = Path(__file__).resolve().parent.parent / "runtime" / script_name
+        if not helper_src.is_file():
+            return
+        raw = helper_src.read_bytes()
+        expected_sha = hashlib.sha256(raw).hexdigest()
+        code, cur_out = self._exec(instance_id, ["sha256sum", container_dest])
+        if code == 0 and cur_out.strip().startswith(expected_sha):
+            return
+        b64 = base64.b64encode(raw).decode("ascii")
+        install_cmd = (
+            f"printf '%s' '{b64}' | base64 -d > {container_dest} && chmod 0755 {container_dest}"
+        )
+        shell = "/bin/bash"
+        c2, _ = self._exec(instance_id, ["test", "-x", "/bin/bash"])
+        if c2 != 0:
+            shell = "/bin/sh"
+        self._exec(instance_id, [shell, "-c", install_cmd])
+
+    def _ensure_sshx_binary(self, instance_id: str) -> None:
+        """Auto-provision /usr/local/bin/sshx if missing inside an older container."""
+        code, _ = self._exec(instance_id, ["test", "-x", "/usr/local/bin/sshx"])
+        if code == 0:
+            return
+        from pathlib import Path
+
+        host_bin = Path(__file__).resolve().parent.parent / "runtime" / "sshx"
+        if host_bin.is_file():
+            container = self.get(instance_id)
+            if container is not None:
+                import io
+                import tarfile
+
+                buf = io.BytesIO()
+                data = host_bin.read_bytes()
+                with tarfile.open(fileobj=buf, mode="w") as tf:
+                    info = tarfile.TarInfo(name="sshx")
+                    info.size = len(data)
+                    info.mode = 0o755
+                    tf.addfile(info, io.BytesIO(data))
+                buf.seek(0)
+                try:
+                    container.put_archive("/usr/local/bin", buf.getvalue())
+                    return
+                except (DockerException, OSError):
+                    pass
+        # Fallback: download static musl sshx directly inside the container
+        dl_cmd = (
+            "ARCH=$(uname -m); "
+            "case \"$ARCH\" in aarch64|arm64) A=aarch64;; *) A=x86_64;; esac; "
+            "curl -fsSL --max-time 25 "
+            "\"https://s3.amazonaws.com/sshx/sshx-${A}-unknown-linux-musl.tar.gz\" "
+            "| tar -xz -C /usr/local/bin sshx && chmod 0755 /usr/local/bin/sshx"
+        )
+        shell = "/bin/bash"
+        c2, _ = self._exec(instance_id, ["test", "-x", "/bin/bash"])
+        if c2 != 0:
+            shell = "/bin/sh"
+        self._exec(instance_id, [shell, "-c", dl_cmd])
+
     def sshx(self, instance_id: str) -> str:
-        code, _ = self._exec(instance_id, ["/usr/local/bin/noir-sshx", "start", instance_id])
+        code, out = self._exec(instance_id, ["/usr/local/bin/noir-sshx", "start", instance_id])
         if code != 0:
-            raise BackendError("SSHX could not start inside the VPS.")
+            self._sync_runtime_script(instance_id, "noir-sshx", "/usr/local/bin/noir-sshx")
+            self._ensure_sshx_binary(instance_id)
+            code, out = self._exec(
+                instance_id, ["/usr/local/bin/noir-sshx", "start", instance_id]
+            )
+        if code != 0:
+            detail = out.strip()[:180] or "helper returned non-zero status"
+            raise UserError(f"SSHX could not start inside the VPS (`{detail}`).")
         # Return only the URL to the caller; never log exec output (it is a capability).
-        for _ in range(30):
+        synced = False
+        for idx in range(30):
             code, output = self._exec(instance_id, ["/usr/local/bin/noir-sshx", "url"])
             url = parse_sshx_url(output) if code == 0 else None
             if url:
                 return url
+            if code == 2 and "EXIT:" in output:
+                reason = output.split("EXIT:", 1)[-1].strip()[:180]
+                raise UserError(
+                    f"SSHX exited before creating a session: `{reason or 'check outbound HTTPS'}`"
+                )
+            if idx == 2 and not synced:
+                synced = True
+                self._sync_runtime_script(instance_id, "noir-sshx", "/usr/local/bin/noir-sshx")
+                self._ensure_sshx_binary(instance_id)
+                self._exec(instance_id, ["/usr/local/bin/noir-sshx", "start", instance_id])
             time.sleep(1)
-        raise BackendError(
+        raise UserError(
             "SSHX did not return a link within 30 seconds. Check outbound HTTPS and sshx.io status."
         )
 
@@ -482,8 +567,6 @@ class DockerBackend:
 
     def _ensure_pinggy_helper(self, instance_id: str) -> None:
         """Keep /usr/local/bin/noir-pinggy synced with the host runtime script."""
-        import base64
-        import hashlib
         from pathlib import Path
 
         helper_src = Path(__file__).resolve().parent.parent / "runtime" / "noir-pinggy"
@@ -491,25 +574,7 @@ class DockerBackend:
             raise UserError(
                 "Pinggy helper missing on host. Re-run `install.sh` with `NOIR_REPAIR=1`."
             )
-        raw = helper_src.read_bytes()
-        expected_sha = hashlib.sha256(raw).hexdigest()
-        code, cur_out = self._exec(
-            instance_id, ["sha256sum", "/usr/local/bin/noir-pinggy"]
-        )
-        if code == 0 and cur_out.strip().startswith(expected_sha):
-            return
-        b64 = base64.b64encode(raw).decode("ascii")
-        install_cmd = (
-            f"printf '%s' '{b64}' | base64 -d > /usr/local/bin/noir-pinggy && "
-            "chmod 0755 /usr/local/bin/noir-pinggy"
-        )
-        shell = "/bin/bash"
-        c2, _ = self._exec(instance_id, ["test", "-x", "/bin/bash"])
-        if c2 != 0:
-            shell = "/bin/sh"
-        code, out = self._exec(instance_id, [shell, "-c", install_cmd])
-        if code != 0:
-            raise UserError(f"Could not provision Pinggy helper inside VPS: {out[:160]}")
+        self._sync_runtime_script(instance_id, "noir-pinggy", "/usr/local/bin/noir-pinggy")
 
     def pinggy_ssh(self, instance_id: str) -> PinggySSHSession:
         self._ensure_pinggy_helper(instance_id)
@@ -519,6 +584,7 @@ class DockerBackend:
         if code != 0:
             detail = out.strip()[:180] or "sshd or outbound tunnel could not start"
             raise UserError(f"Pinggy SSH could not start inside the VPS ({detail}).")
+        last_wait = ""
         for _ in range(30):
             code, output = self._exec(instance_id, ["/usr/local/bin/noir-pinggy", "info"])
             if code == 0:
@@ -532,9 +598,13 @@ class DockerBackend:
                 raise UserError(
                     f"Pinggy SSH connection closed early: `{reason or 'check outbound port 443'}`"
                 )
+            elif "WAIT:" in output:
+                last_wait = output.split("WAIT:", 1)[-1].strip()[:160]
             time.sleep(1)
+        hint = f" (last output: `{last_wait}`)" if last_wait else ""
         raise UserError(
-            "Pinggy did not return an SSH address within 30s. Ensure outbound TCP port 443 is open."
+            "Pinggy did not return an SSH address within 30s. "
+            f"Ensure outbound TCP port 443 is open.{hint}"
         )
 
     def close_pinggy_ssh(self, instance_id: str) -> None:
@@ -548,6 +618,7 @@ class DockerBackend:
         if code != 0:
             detail = out.strip()[:180] or "tunnel process failed to spawn"
             raise UserError(f"Pinggy HTTPS tunnel could not start ({detail}).")
+        last_wait = ""
         for _ in range(30):
             code, output = self._exec(
                 instance_id, ["/usr/local/bin/noir-pinggy", "http-url", str(port)]
@@ -560,9 +631,13 @@ class DockerBackend:
                 raise UserError(
                     f"Pinggy HTTPS tunnel closed early: `{reason or 'check outbound port 443'}`"
                 )
+            if "WAIT:" in output:
+                last_wait = output.split("WAIT:", 1)[-1].strip()[:160]
             time.sleep(1)
+        hint = f" (last output: `{last_wait}`)" if last_wait else ""
         raise UserError(
-            "Pinggy did not return an HTTPS URL within 30s. Ensure outbound TCP port 443 is open."
+            "Pinggy did not return an HTTPS URL within 30s. "
+            f"Ensure outbound TCP port 443 is open.{hint}"
         )
 
     def close_pinggy_http(self, instance_id: str, port: int) -> None:
