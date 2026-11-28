@@ -141,6 +141,7 @@ async def test_deploy_without_target_offers_os_for_self(bot, guild, admin_member
         "ubuntu-24.04",
         "ubuntu-22.04",
         "debian-12",
+        "alpine-3.20",
     }
     assert view.select.max_values == 1
     assert f"<@{actor.user_id}>" in str(ctx.send.call_args.kwargs["embed"].to_dict())
@@ -724,3 +725,47 @@ async def test_user_backup_restore_restart_transfer_and_audit_channel(
     for call in log_channel.send.await_args_list:
         assert "file" not in call.kwargs
         assert "> **Event**" in call.kwargs["embed"].description
+
+
+async def test_promo_gencode_redeem_port_rename_exec_logs_template_and_sshkey(
+    bot, guild, admin_member, target_member, manager, actor, store
+):
+    # Admin generates a 2-use promo code
+    gen_ctx = await invoke(bot, guild, admin_member, "gencode", "1 1 2 7d 2")
+    gen_embed = gen_ctx.send.call_args.kwargs["embed"]
+    assert "Promo Code Generated" in gen_embed.title
+    code = store.list_codes(actor.guild_id)[0].code
+
+    # Member redeems code and selects Alpine 3.20
+    member = make_member(TARGET_ID, guild, admin=False)
+    red_ctx = await invoke(bot, guild, member, "redeem", code)
+    red_view = red_ctx.send.call_args.kwargs["view"]
+    choose_ix = make_interaction(member, actor.guild_id, values=["alpine-3.20"])
+    await red_view.select.callback(choose_ix)
+    created = store.list(actor.guild_id, TARGET_ID)[0]
+    assert created.os == "alpine-3.20"
+
+    # Rename, Port Forwarding, Exec, Logs, Template, SSH key
+    await invoke(bot, guild, member, "rename", f"{created.id} Prod-API")
+    assert store.get(created.id).name == "Prod-API"
+
+    port_ctx = await invoke(bot, guild, member, "port", f"add {created.id} 8000")
+    assert "20000" in port_ctx.send.call_args.kwargs["embed"].description
+
+    exec_ctx = await invoke(bot, guild, member, "exec", f"{created.id} echo hello")
+    assert "echo hello" in exec_ctx.send.call_args.kwargs["embed"].description
+
+    logs_ctx = await invoke(bot, guild, member, "logs", created.id)
+    assert "PROCESSES" in logs_ctx.send.call_args.kwargs["embed"].description
+
+    tmpl_ctx = await invoke(bot, guild, member, "template", f"{created.id} fastapi-web")
+    assert "Starter Template Installed" in tmpl_ctx.send.call_args.kwargs["embed"].title
+
+    pubkey = (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC user@box"
+    )
+    await invoke(bot, guild, member, "sshkey", pubkey)
+    assert store.get_ssh_key(TARGET_ID) == pubkey
+
+    codes_ctx = await invoke(bot, guild, admin_member, "codes")
+    assert code in codes_ctx.send.call_args.kwargs["embed"].description

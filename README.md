@@ -1,9 +1,11 @@
 # NOIR — Discord VPS Deploy Bot
 
-Admin-created Ubuntu 24.04 / Ubuntu 22.04 / Debian 12 development containers, controlled from your locked Discord server **and directly in bot DMs** (both `!` prefix and `/` slash commands):
+Admin-created Ubuntu 24.04 / Ubuntu 22.04 / Debian 12 / Alpine 3.20 development containers, controlled from your locked Discord server **and directly in bot DMs** (both `!` prefix and `/` slash commands):
 
 ```text
 !deploy 1 1 1 @user [30d]       admin only: RAM · CPU · disk · optional @user & expiry timer
+!gencode 1 1 2 [30d] [uses]     admin only: generate redeemable promo/trial codes (!codes to list)
+!redeem <CODE>                  any member: redeem a promo code & choose OS to deploy instantly
 !status                         admin only: live Host Node dashboard (CPU, RAM, Disk, Fleet)
 !list [@user]                   admin only: paginated Fleet Browser + quick-manage selector
 !suspend <id> [reason]          admin only: stop & lock a VPS while keeping /home/noir safe
@@ -12,7 +14,12 @@ Admin-created Ubuntu 24.04 / Ubuntu 22.04 / Debian 12 development containers, co
 !renew <id> <30d|never>         admin only: extend or clear automatic expiry timer
 !panel                          admin only: post an interactive NOIR Cloud Panel hub card
 !delete @user                   admin only: pick one of that member's VPSes, then confirm
-!manage                         server or DMs: Start · Stop · Restart · Console · Backup · Restore · Reinstall
+!manage                         server or DMs: Start · Stop · Restart · Console · Ports · Rename · Logs · Templates · Backup · Restore
+!port add <id> <port>           owner or admin: forward a public host TCP port to your container
+!rename <id> <name>             owner or admin: set a custom nickname for your VPS
+!exec <id> <cmd> / !logs <id>   owner or admin: quick command exec or active process/port snapshot
+!template <id> [template]       owner or admin: 1-click Discord.py / Node.js / FastAPI / Express starter
+!sshkey <pubkey|clear>          owner: sync your SSH public key to /home/noir/.ssh/authorized_keys
 !transfer <id> @user            owner or admin: transfer VPS ownership to another member
 ```
 

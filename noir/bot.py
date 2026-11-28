@@ -17,15 +17,20 @@ from .ui import (
     COLOR,
     DANGER,
     SUCCESS,
+    WARNING,
     ConfirmView,
     DeployOSView,
     FleetView,
     HostStatusView,
     ManageView,
     PanelHubView,
+    PortsView,
+    RedeemOSView,
+    TemplateView,
     UserDeleteView,
     action_card_embed,
     audit_embed,
+    codes_embed,
     confirm_embed,
     empty_embed,
     error_text,
@@ -33,8 +38,11 @@ from .ui import (
     help_embed,
     host_status_embed,
     instance_embed,
+    logs_embed,
     os_choice_embed,
     panel_hub_embed,
+    ports_embed,
+    templates_embed,
     user_delete_embed,
 )
 
@@ -62,6 +70,7 @@ class NoirBot(commands.Bot):
         self.manager = manager
         self.backend = backend
         self._ready_logged = False
+        self._last_overload_alert = 0.0
 
     def locked_guild(self) -> discord.Guild | None:
         allowed = self.settings.allowed_guild_id
@@ -150,11 +159,38 @@ class NoirBot(commands.Bot):
 
     @tasks.loop(seconds=60)
     async def _expiry_loop(self) -> None:
+        import time
+
+        try:
+            warnings = await self.manager.sweep_expiry_warnings()
+        except Exception:
+            log.exception("Expiry warning sweep failed")
+            warnings = []
+        for inst, window in warnings:
+            try:
+                user = self.get_user(inst.owner_id) or await self.fetch_user(inst.owner_id)
+                if user is not None:
+                    dm = await user.create_dm()
+                    await dm.send(
+                        embed=action_card_embed(
+                            f"VPS Expiry Reminder ({window})",
+                            inst,
+                            status_line=f"Expiring within {window}",
+                            detail_line=(
+                                "**Action needed** — ask a server administrator to renew "
+                                "your VPS before it auto-suspends"
+                            ),
+                            color=WARNING,
+                        )
+                    )
+            except Exception:
+                log.debug("Could not DM expiry reminder to %s for %s", inst.owner_id, inst.id)
+
         try:
             expired = await self.manager.sweep_expired()
         except Exception:
             log.exception("Expiry sweep failed")
-            return
+            expired = []
         for inst in expired:
             await self.audit_log(
                 "VPS Auto-Suspended (Expired)",
@@ -181,6 +217,38 @@ class NoirBot(commands.Bot):
                     )
             except Exception:
                 log.debug("Could not DM owner %s about expired VPS %s", inst.owner_id, inst.id)
+
+        if (
+            self.settings.log_channel_id
+            and self.settings.allowed_guild_id
+            and time.monotonic() - self._last_overload_alert > 3600
+        ):
+            try:
+                sys_actor = Actor(0, self.settings.allowed_guild_id, True)
+                host = await self.manager.host_status(sys_actor)
+                ram_pct = (
+                    host.ram_used_bytes / host.ram_total_bytes * 100.0
+                    if host.ram_total_bytes
+                    else 0.0
+                )
+                disk_pct = (
+                    host.disk_used_bytes / host.disk_total_bytes * 100.0
+                    if host.disk_total_bytes
+                    else 0.0
+                )
+                if ram_pct >= 90.0 or disk_pct >= 90.0:
+                    self._last_overload_alert = time.monotonic()
+                    await self.audit_log(
+                        "Host Resource Alert",
+                        actor_id=None,
+                        detail=(
+                            f"Host `{host.hostname}` pressure high — "
+                            f"RAM `{ram_pct:.1f}%` • Disk `{disk_pct:.1f}%`"
+                        ),
+                        color=DANGER,
+                    )
+            except Exception:
+                log.debug("Host overload check skipped", exc_info=True)
 
     async def setup_hook(self) -> None:
         await asyncio.to_thread(self.backend.preflight)
@@ -750,6 +818,272 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         )
         view.message = message
 
+    @bot.command(name="rename")
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def rename_command(
+        ctx: commands.Context, instance_id: str, *, nickname: str | None = None
+    ):
+        """Set or clear a custom nickname for your VPS."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        raw = None if (nickname and nickname.strip().lower() in {"clear", "none"}) else nickname
+        updated = await manager.rename(actor, instance_id, raw)
+        detail = f"Renamed to `{updated.name}`" if updated.name else "Nickname cleared"
+        await ctx.send(
+            embed=action_card_embed(
+                "VPS Nickname Updated",
+                updated,
+                status_line=detail,
+                detail_line="**Saved** — your custom label now appears on `!manage` and `!list`",
+                color=ACCENT,
+            ),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="port", aliases=["ports"], ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def port_command(
+        ctx: commands.Context,
+        first: str,
+        second: str | None = None,
+        third: int | None = None,
+    ):
+        """Manage public TCP port forwards: !port <id> | !port add/remove <id> <port>."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        sub = first.strip().lower()
+        if sub in {"add", "forward", "open"}:
+            if second is None or third is None:
+                raise UserError("Usage: `!port add <vps_id> <container_port>` (e.g. `3000`).")
+            mapping = await manager.add_port(actor, second, third)
+            instance = await manager.get(actor, second)
+            mappings = await manager.list_ports(actor, second)
+            await bot.audit_log(
+                "Port Forwarded",
+                actor_id=actor.user_id,
+                instance=instance,
+                detail=f"`{mapping.host_port}` → `{mapping.container_port}/tcp`",
+                color=ACCENT,
+            )
+        elif sub in {"remove", "rm", "del", "delete"}:
+            if second is None or third is None:
+                raise UserError("Usage: `!port remove <vps_id> <port>`.")
+            instance = await manager.remove_port(actor, second, third)
+            mappings = await manager.list_ports(actor, second)
+        else:
+            if second is not None or third is not None:
+                raise UserError(
+                    "Usage: `!port <vps_id>`, `!port add <vps_id> <port>`, "
+                    "or `!port remove <vps_id> <port>`."
+                )
+            instance = await manager.get(actor, first)
+            mappings = await manager.list_ports(actor, first)
+        view = PortsView(bot, actor, instance, mappings)
+        message = await ctx.send(
+            embed=ports_embed(
+                instance,
+                mappings,
+                public_ip=settings.public_ip,
+                max_ports=settings.max_ports_per_vps,
+            ),
+            view=view,
+            reference=ctx.message,
+            mention_author=False,
+        )
+        view.message = message
+
+    @bot.command(name="gencode", ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def gencode_command(
+        ctx: commands.Context,
+        ram: int,
+        cpu: int,
+        disk: int,
+        arg1: str | None = None,
+        arg2: int | None = None,
+    ):
+        """Admin-only: generate a promo/trial code (!gencode RAM CPU DISK [30d] [uses])."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if not actor.is_admin:
+            raise UserError("Only server administrators can generate redeem codes.")
+        specs = Specs(ram, cpu, disk)
+        duration_seconds: int | None = None
+        uses = 1
+        if arg1 is not None:
+            cleaned = arg1.strip().lower()
+            if cleaned in {"never", "permanent"}:
+                duration_seconds = None
+            elif cleaned.isdigit() and arg2 is None:
+                uses = int(cleaned)
+            else:
+                duration_seconds = parse_duration_seconds(cleaned)
+        if arg2 is not None:
+            uses = arg2
+        promo = await manager.create_code(
+            actor, specs, duration_seconds=duration_seconds, max_uses=uses
+        )
+        await bot.audit_log(
+            "Promo Code Created",
+            actor_id=actor.user_id,
+            detail=f"`{promo.code}` • {specs.label()} • Uses `{promo.max_uses}`",
+            color=ACCENT,
+        )
+        dur_label = (
+            f"{promo.duration_seconds // 86400}d"
+            if promo.duration_seconds and promo.duration_seconds % 86400 == 0
+            else (f"{promo.duration_seconds // 3600}h" if promo.duration_seconds else "Permanent")
+        )
+        embed = discord.Embed(
+            title=f"Promo Code Generated — `{promo.code}`",
+            description=(
+                f"`{promo.code}`\n"
+                f"> **Status** Ready to Redeem\n\n"
+                f"> **Plan** {promo.ram_gb}GB RAM / {promo.cpu} CPU / {promo.disk_gb}GB Disk\n"
+                f"> **Duration** `{dur_label}` • **Max Claims** `{promo.max_uses}`\n\n"
+                f"> Any server member can claim with `!redeem {promo.code}` or `/redeem`."
+            ),
+            color=SUCCESS,
+        )
+        embed.set_footer(text="NOIR Cloud • Promo & Trial Codes")
+        await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+
+    @bot.command(name="codes", ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def codes_command(
+        ctx: commands.Context, action: str | None = None, code: str | None = None
+    ):
+        """Admin-only: list promo codes or delete one (!codes delete <CODE>)."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if not actor.is_admin:
+            raise UserError("Only server administrators can manage promo codes.")
+        if action is not None:
+            if action.strip().lower() not in {"delete", "del", "rm", "remove"} or not code:
+                raise UserError("Usage: `!codes` or `!codes delete <CODE>`.")
+            await manager.delete_code(actor, code)
+        codes = await manager.list_codes(actor)
+        await ctx.send(embed=codes_embed(codes), reference=ctx.message, mention_author=False)
+
+    @bot.command(name="redeem", ignore_extra=False)
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def redeem_command(ctx: commands.Context, code: str):
+        """Redeem a promo/plan code to deploy your own VPS."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        promo = await manager.validate_redeem(actor, code)
+        exp_preview = (
+            future_iso(promo.duration_seconds) if promo.duration_seconds is not None else None
+        )
+        view = RedeemOSView(bot, actor, promo)
+        message = await ctx.send(
+            embed=os_choice_embed(promo.specs, actor.user_id, expires_at=exp_preview),
+            view=view,
+            reference=ctx.message,
+            mention_author=False,
+        )
+        view.message = message
+
+    @bot.command(name="exec")
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def exec_command(ctx: commands.Context, instance_id: str, *, shell_cmd: str):
+        """Run a quick command inside your VPS and view output."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        instance, code, out = await manager.exec_command(actor, instance_id, shell_cmd)
+        header = f"Command Exit `{code}`"
+        await ctx.send(
+            embed=logs_embed(instance, out or "(no output)", title_prefix=header),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="logs", ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def logs_command(ctx: commands.Context, instance_id: str):
+        """Inspect active processes & listening ports inside your VPS."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        instance, out = await manager.inspect_processes(actor, instance_id)
+        await ctx.send(
+            embed=logs_embed(instance, out),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="template", aliases=["templates"], ignore_extra=False)
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def template_command(
+        ctx: commands.Context, instance_id: str, template_id: str | None = None
+    ):
+        """Install a 1-click starter template into /home/noir."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        instance = await manager.get(actor, instance_id)
+        if template_id is None:
+            view = TemplateView(bot, actor, instance)
+            message = await ctx.send(
+                embed=templates_embed(instance),
+                view=view,
+                reference=ctx.message,
+                mention_author=False,
+            )
+            view.message = message
+            return
+        inst, directory = await manager.install_template(actor, instance.id, template_id)
+        await bot.audit_log(
+            "Starter Template Installed",
+            actor_id=actor.user_id,
+            instance=inst,
+            detail=f"Template `{template_id}` in `{directory}`",
+            color=ACCENT,
+        )
+        await ctx.send(
+            embed=action_card_embed(
+                "Starter Template Installed",
+                inst,
+                status_line=f"Scaffolded · `{template_id}`",
+                detail_line=f"**Ready** — open **Console** and `cd {directory}` to start building",
+                color=SUCCESS,
+            ),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="sshkey")
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def sshkey_command(ctx: commands.Context, *, raw_key: str | None = None):
+        """Save, view, or clear your SSH public key synced to /home/noir/.ssh/authorized_keys."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if raw_key is None:
+            saved = await manager.get_ssh_key(actor)
+            desc = (
+                f"`ssh-key-configured`\n> **Status** Saved\n\n> `{saved[:90]}…`"
+                if saved
+                else "`ssh-key-empty`\n> **Status** Not Configured\n\n"
+                "> Save one with `!sshkey ssh-ed25519 AAAA...` (best sent in Bot DMs)."
+            )
+            embed = discord.Embed(title="SSH Public Key", description=desc, color=COLOR)
+            embed.set_footer(text="NOIR Cloud • SSH Key Sync")
+            await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+            return
+        if raw_key.strip().lower() in {"clear", "remove", "delete", "none"}:
+            await manager.clear_ssh_key(actor)
+            embed = discord.Embed(
+                title="SSH Public Key Cleared",
+                description="`ssh-key-cleared`\n> **Status** Removed from future deployments",
+                color=WARNING,
+            )
+            embed.set_footer(text="NOIR Cloud • SSH Key Sync")
+            await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+            return
+        _, synced = await manager.set_ssh_key(actor, raw_key)
+        embed = discord.Embed(
+            title="SSH Public Key Saved",
+            description=(
+                f"`ssh-key-synced`\n"
+                f"> **Status** Active · Synced to {synced} Running VPS\n\n"
+                f"> Written to `/home/noir/.ssh/authorized_keys` and "
+                f"auto-applied on future deploys."
+            ),
+            color=SUCCESS,
+        )
+        embed.set_footer(text="NOIR Cloud • SSH Key Sync")
+        await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+
     @bot.command(name="ping")
     async def ping(ctx: commands.Context):
         await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
@@ -939,6 +1273,93 @@ def _register_slash_commands(bot: NoirBot, settings: Settings, manager: Manager)
                     detail_line="**Access restored** — the VPS container is back online",
                     color=SUCCESS,
                 )
+            )
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+
+    @bot.tree.command(name="redeem", description="Redeem a promo/plan code to deploy a VPS")
+    @app_commands.describe(code="Promo code such as NOIR-XXXX-YYYY")
+    async def slash_redeem(interaction: discord.Interaction, code: str):
+        try:
+            actor = await bot.resolve_actor(interaction.user, interaction.guild_id)
+            promo = await manager.validate_redeem(actor, code)
+            exp_preview = (
+                future_iso(promo.duration_seconds) if promo.duration_seconds is not None else None
+            )
+            view = RedeemOSView(bot, actor, promo)
+            await interaction.response.send_message(
+                embed=os_choice_embed(promo.specs, actor.user_id, expires_at=exp_preview),
+                view=view,
+                ephemeral=interaction.guild is not None,
+            )
+            view.message = await interaction.original_response()
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+
+    @bot.tree.command(name="gencode", description="Admin: generate a redeemable VPS promo code")
+    @app_commands.describe(
+        ram="RAM in GiB",
+        cpu="vCPU cores",
+        disk="Disk in GiB",
+        duration="Optional duration (e.g. 30d, 7d, 12h)",
+        uses="Maximum claims (default 1)",
+    )
+    async def slash_gencode(
+        interaction: discord.Interaction,
+        ram: int,
+        cpu: int,
+        disk: int,
+        duration: str | None = None,
+        uses: int = 1,
+    ):
+        try:
+            actor = await bot.resolve_actor(interaction.user, interaction.guild_id)
+            if not actor.is_admin:
+                raise UserError("Only server administrators can generate redeem codes.")
+            specs = Specs(ram, cpu, disk)
+            dur_secs = parse_duration_seconds(duration) if duration else None
+            promo = await manager.create_code(
+                actor, specs, duration_seconds=dur_secs, max_uses=uses
+            )
+            await bot.audit_log(
+                "Promo Code Created",
+                actor_id=actor.user_id,
+                detail=f"`{promo.code}` • {specs.label()} • Uses `{promo.max_uses}`",
+                color=ACCENT,
+            )
+            embed = discord.Embed(
+                title=f"Promo Code Generated — `{promo.code}`",
+                description=(
+                    f"`{promo.code}`\n"
+                    f"> **Status** Ready to Redeem\n\n"
+                    f"> **Plan** {promo.ram_gb}GB RAM / {promo.cpu} CPU / {promo.disk_gb}GB Disk\n"
+                    f"> **Max Claims** `{promo.max_uses}` • "
+                    f"**Redeem** `!redeem {promo.code}` or `/redeem`"
+                ),
+                color=SUCCESS,
+            )
+            embed.set_footer(text="NOIR Cloud • Promo & Trial Codes")
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+
+    @bot.tree.command(name="rename", description="Set or clear a custom nickname for your VPS")
+    async def slash_rename(
+        interaction: discord.Interaction, instance_id: str, nickname: str | None = None
+    ):
+        try:
+            actor = await bot.resolve_actor(interaction.user, interaction.guild_id)
+            updated = await manager.rename(actor, instance_id, nickname)
+            detail = f"Renamed to `{updated.name}`" if updated.name else "Nickname cleared"
+            await interaction.response.send_message(
+                embed=action_card_embed(
+                    "VPS Nickname Updated",
+                    updated,
+                    status_line=detail,
+                    detail_line="**Saved** — custom label updated across `!manage` and `!list`",
+                    color=ACCENT,
+                ),
+                ephemeral=True,
             )
         except Exception as exc:
             await interaction.response.send_message(error_text(exc), ephemeral=True)

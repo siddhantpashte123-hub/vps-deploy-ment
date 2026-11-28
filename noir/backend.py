@@ -206,62 +206,76 @@ class DockerBackend:
         guild_id: int,
         progress: Progress | None = None,
         os_key: str = DEFAULT_OS,
+        ports: dict[int, int] | None = None,
     ) -> str:
         _report(progress, "container", 60)
+        sleep_cmd = (
+            ["/bin/sleep", "infinity"]
+            if os_key.startswith("alpine")
+            else ["/usr/bin/sleep", "infinity"]
+        )
+        docker_ports = (
+            {f"{cport}/tcp": ("0.0.0.0", hport) for cport, hport in ports.items()}
+            if ports
+            else None
+        )
+        run_kwargs: dict[str, Any] = {
+            "image": self.settings.image_for(os_key),
+            "name": instance_id,
+            "hostname": instance_id,
+            "command": sleep_cmd,
+            "detach": True,
+            "init": True,
+            "user": ROOT_USER,
+            "working_dir": VPS_HOME,
+            "environment": {
+                "HOME": VPS_HOME,
+                "USER": "root",
+                "LOGNAME": "root",
+                "NOIR_VPS_ID": instance_id,
+                "NOIR_ROOT_ACCESS": "1",
+                "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+            },
+            "labels": {
+                LABEL: "true",
+                "noir.id": instance_id,
+                "noir.owner": str(owner_id),
+                "noir.guild": str(guild_id),
+                "noir.runtime": "root-v2",
+                "noir.os": os_key,
+            },
+            "network": self.settings.network,
+            "mem_limit": specs.memory_bytes,
+            "memswap_limit": specs.memory_bytes,
+            "nano_cpus": specs.cpu * 1_000_000_000,
+            "pids_limit": 256,
+            "cap_drop": ["ALL"],
+            "cap_add": ROOT_CAPABILITIES,
+            "security_opt": ["no-new-privileges:true"],
+            "read_only": False,
+            "mounts": [
+                Mount(
+                    target=VPS_HOME,
+                    source=self.mount_path(instance_id),
+                    type="bind",
+                    read_only=False,
+                    propagation="rprivate",
+                )
+            ],
+            "tmpfs": {
+                "/tmp": "rw,nosuid,nodev,size=64m,mode=1777",
+                "/run": "rw,nosuid,nodev,size=16m,mode=755",
+            },
+            "ulimits": [Ulimit(name="nofile", soft=1024, hard=1024)],
+            "log_config": LogConfig(type="json-file", config={"max-size": "5m", "max-file": "2"}),
+            "restart_policy": {"Name": "unless-stopped", "MaximumRetryCount": 0},
+            "auto_remove": False,
+            "privileged": False,
+        }
+        if docker_ports:
+            run_kwargs["ports"] = docker_ports
         try:
-            container = self.client.containers.run(
-                image=self.settings.image_for(os_key),
-                name=instance_id,
-                hostname=instance_id,
-                command=["/usr/bin/sleep", "infinity"],
-                detach=True,
-                init=True,
-                user=ROOT_USER,
-                working_dir=VPS_HOME,
-                environment={
-                    "HOME": VPS_HOME,
-                    "USER": "root",
-                    "LOGNAME": "root",
-                    "NOIR_VPS_ID": instance_id,
-                    "NOIR_ROOT_ACCESS": "1",
-                    "PIP_DISABLE_PIP_VERSION_CHECK": "1",
-                },
-                labels={
-                    LABEL: "true",
-                    "noir.id": instance_id,
-                    "noir.owner": str(owner_id),
-                    "noir.guild": str(guild_id),
-                    "noir.runtime": "root-v2",
-                    "noir.os": os_key,
-                },
-                network=self.settings.network,
-                mem_limit=specs.memory_bytes,
-                memswap_limit=specs.memory_bytes,
-                nano_cpus=specs.cpu * 1_000_000_000,
-                pids_limit=256,
-                cap_drop=["ALL"],
-                cap_add=ROOT_CAPABILITIES,
-                security_opt=["no-new-privileges:true"],
-                read_only=False,
-                mounts=[
-                    Mount(
-                        target=VPS_HOME,
-                        source=self.mount_path(instance_id),
-                        type="bind",
-                        read_only=False,
-                        propagation="rprivate",
-                    )
-                ],
-                tmpfs={
-                    "/tmp": "rw,nosuid,nodev,size=64m,mode=1777",
-                    "/run": "rw,nosuid,nodev,size=16m,mode=755",
-                },
-                ulimits=[Ulimit(name="nofile", soft=1024, hard=1024)],
-                log_config=LogConfig(type="json-file", config={"max-size": "5m", "max-file": "2"}),
-                restart_policy={"Name": "unless-stopped", "MaximumRetryCount": 0},
-                auto_remove=False,
-                privileged=False,
-            )
+            container = self.client.containers.run(**run_kwargs)
             _report(progress, "boot", 85)
             container.reload()
             if not container.attrs.get("State", {}).get("Running"):
@@ -279,11 +293,14 @@ class DockerBackend:
         guild_id: int,
         progress: Progress | None = None,
         os_key: str = DEFAULT_OS,
+        ports: dict[int, int] | None = None,
     ) -> str:
         _report(progress, "storage", 35)
         self._helper("create", instance_id, specs.disk_gb)
         _report(progress, "storage", 50)
-        return self._run_container(instance_id, specs, owner_id, guild_id, progress, os_key)
+        return self._run_container(
+            instance_id, specs, owner_id, guild_id, progress, os_key, ports=ports
+        )
 
     def recreate_container(
         self,
@@ -293,6 +310,7 @@ class DockerBackend:
         guild_id: int,
         running: bool = True,
         os_key: str = DEFAULT_OS,
+        ports: dict[int, int] | None = None,
     ) -> str:
         """Replace only the container, preserving the persistent home disk/files."""
         container = self.get(instance_id)
@@ -302,7 +320,9 @@ class DockerBackend:
             except (DockerException, OSError) as exc:
                 raise BackendError("Docker could not replace the old VPS container.") from exc
         self._helper("mount", instance_id)
-        container_id = self._run_container(instance_id, specs, owner_id, guild_id, os_key=os_key)
+        container_id = self._run_container(
+            instance_id, specs, owner_id, guild_id, os_key=os_key, ports=ports
+        )
         if not running:
             self.stop(instance_id)
         return container_id
@@ -450,6 +470,40 @@ class DockerBackend:
 
     def close_sshx(self, instance_id: str) -> None:
         self._exec(instance_id, ["/usr/local/bin/noir-sshx", "stop"])
+
+    def exec_command(self, instance_id: str, shell_cmd: str) -> tuple[int, str]:
+        container = self.get(instance_id)
+        if container is None or container.status != "running":
+            raise UserError("Start the VPS before running commands.")
+        return self._exec(instance_id, ["timeout", "20", "/bin/bash", "-lc", shell_cmd])
+
+    def inspect_processes(self, instance_id: str) -> str:
+        container = self.get(instance_id)
+        if container is None or container.status != "running":
+            raise UserError("Start the VPS first to inspect active processes.")
+        script = (
+            "echo '=== PROCESSES ==='; "
+            "ps -eo pid,pcpu,pmem,etime,args --sort=-pcpu 2>/dev/null | head -n 12 "
+            "|| ps aux | head -n 12; "
+            "echo ''; echo '=== LISTENING PORTS ==='; "
+            "ss -tulpn 2>/dev/null | head -n 10 || true"
+        )
+        _, out = self._exec(instance_id, ["/bin/bash", "-lc", script])
+        return out.strip()[:1800]
+
+    def write_ssh_key(self, instance_id: str, pubkey: str) -> None:
+        container = self.get(instance_id)
+        if container is None or container.status != "running":
+            return
+        import shlex
+
+        quoted = shlex.quote(pubkey)
+        script = (
+            "mkdir -p /home/noir/.ssh && chmod 700 /home/noir/.ssh && "
+            f"printf '%s\\n' {quoted} > /home/noir/.ssh/authorized_keys && "
+            "chmod 600 /home/noir/.ssh/authorized_keys"
+        )
+        self._exec(instance_id, ["/bin/bash", "-lc", script])
 
     def reconcile(self, known_ids: set[str]) -> dict[str, str]:
         try:

@@ -1,17 +1,35 @@
 from __future__ import annotations
 
+import secrets
 import sqlite3
+import string
 import threading
 from pathlib import Path
 
-from .errors import NotFound
-from .models import STATUSES, Instance, utc_now, valid_id
+from .errors import NotFound, UserError
+from .models import (
+    STATUSES,
+    Instance,
+    PortMapping,
+    RedeemCode,
+    Specs,
+    utc_now,
+    valid_id,
+)
 from .os_catalog import valid_os
 
 COLUMNS = (
     "id, guild_id, owner_id, ram_gb, cpu, disk_gb, container_id, status, "
-    "created_at, updated_at, os, expires_at, suspended_reason, backup_at"
+    "created_at, updated_at, os, expires_at, suspended_reason, backup_at, "
+    "name, warned_24h, warned_1h"
 )
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _random_code() -> str:
+    left = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(4))
+    right = "".join(secrets.choice(_CODE_ALPHABET) for _ in range(4))
+    return f"NOIR-{left}-{right}"
 
 
 class Store:
@@ -40,7 +58,10 @@ class Store:
                     os TEXT NOT NULL DEFAULT 'ubuntu-24.04',
                     expires_at TEXT,
                     suspended_reason TEXT,
-                    backup_at TEXT
+                    backup_at TEXT,
+                    name TEXT,
+                    warned_24h INTEGER NOT NULL DEFAULT 0,
+                    warned_1h INTEGER NOT NULL DEFAULT 0
                 )"""
             )
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(instances)")}
@@ -54,8 +75,60 @@ class Store:
                 self._db.execute("ALTER TABLE instances ADD COLUMN suspended_reason TEXT")
             if "backup_at" not in columns:
                 self._db.execute("ALTER TABLE instances ADD COLUMN backup_at TEXT")
+            if "name" not in columns:
+                self._db.execute("ALTER TABLE instances ADD COLUMN name TEXT")
+            if "warned_24h" not in columns:
+                self._db.execute(
+                    "ALTER TABLE instances ADD COLUMN warned_24h INTEGER NOT NULL DEFAULT 0"
+                )
+            if "warned_1h" not in columns:
+                self._db.execute(
+                    "ALTER TABLE instances ADD COLUMN warned_1h INTEGER NOT NULL DEFAULT 0"
+                )
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS instances_owner ON instances(guild_id, owner_id)"
+            )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS port_mappings (
+                    host_port INTEGER PRIMARY KEY,
+                    instance_id TEXT NOT NULL,
+                    container_port INTEGER NOT NULL CHECK(container_port BETWEEN 1 AND 65535),
+                    created_at TEXT NOT NULL,
+                    UNIQUE(instance_id, container_port)
+                )"""
+            )
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS ports_instance ON port_mappings(instance_id)"
+            )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS redeem_codes (
+                    code TEXT PRIMARY KEY,
+                    guild_id TEXT NOT NULL,
+                    ram_gb INTEGER NOT NULL CHECK(ram_gb > 0),
+                    cpu INTEGER NOT NULL CHECK(cpu > 0),
+                    disk_gb INTEGER NOT NULL CHECK(disk_gb > 0),
+                    duration_seconds INTEGER,
+                    max_uses INTEGER NOT NULL CHECK(max_uses > 0),
+                    uses INTEGER NOT NULL DEFAULT 0,
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )"""
+            )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS redeem_claims (
+                    code TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    instance_id TEXT NOT NULL,
+                    claimed_at TEXT NOT NULL,
+                    PRIMARY KEY (code, user_id)
+                )"""
+            )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS ssh_keys (
+                    user_id TEXT PRIMARY KEY,
+                    pubkey TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )"""
             )
 
     def close(self) -> None:
@@ -72,7 +145,7 @@ class Store:
         with self._lock, self._db:
             self._db.execute(
                 f"INSERT INTO instances ({COLUMNS}) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     instance.id,
                     str(instance.guild_id),
@@ -88,6 +161,9 @@ class Store:
                     instance.expires_at,
                     instance.suspended_reason,
                     instance.backup_at,
+                    instance.name,
+                    int(instance.warned_24h),
+                    int(instance.warned_1h),
                 ),
             )
         return instance
@@ -128,6 +204,9 @@ class Store:
             "expires_at",
             "suspended_reason",
             "backup_at",
+            "name",
+            "warned_24h",
+            "warned_1h",
         }
         if not fields or not set(fields) <= allowed:
             raise ValueError("Unsupported inventory update")
@@ -150,6 +229,7 @@ class Store:
 
     def delete(self, instance_id: str) -> None:
         with self._lock, self._db:
+            self._db.execute("DELETE FROM port_mappings WHERE instance_id = ?", (instance_id,))
             self._db.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
 
     def totals(self) -> tuple[int, int, int]:
@@ -158,3 +238,198 @@ class Store:
                 "SELECT COUNT(*), COALESCE(SUM(ram_gb),0), COALESCE(SUM(cpu),0) FROM instances"
             ).fetchone()
         return int(row[0]), int(row[1]), int(row[2])
+
+    # ---- Port mappings ----
+    def list_ports(self, instance_id: str) -> list[PortMapping]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT host_port, instance_id, container_port, created_at "
+                "FROM port_mappings WHERE instance_id = ? ORDER BY host_port",
+                (instance_id,),
+            ).fetchall()
+        return [PortMapping.from_row(r) for r in rows]
+
+    def allocate_port(
+        self,
+        instance_id: str,
+        container_port: int,
+        *,
+        port_start: int = 20000,
+        port_end: int = 20199,
+        max_per_vps: int = 5,
+    ) -> PortMapping:
+        if not 1 <= container_port <= 65535:
+            raise UserError("Container port must be between 1 and 65535.")
+        with self._lock, self._db:
+            existing = self.list_ports(instance_id)
+            for item in existing:
+                if item.container_port == container_port:
+                    return item
+            if len(existing) >= max_per_vps:
+                raise UserError(f"Maximum of {max_per_vps} forwarded ports reached for this VPS.")
+            used = {
+                int(r[0])
+                for r in self._db.execute("SELECT host_port FROM port_mappings").fetchall()
+            }
+            chosen = next((p for p in range(port_start, port_end + 1) if p not in used), None)
+            if chosen is None:
+                raise UserError("No free public ports remain in the host pool.")
+            now = utc_now()
+            self._db.execute(
+                "INSERT INTO port_mappings (host_port, instance_id, container_port, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                (chosen, instance_id, container_port, now),
+            )
+        return PortMapping(chosen, instance_id, container_port, now)
+
+    def remove_port(self, instance_id: str, port_number: int) -> bool:
+        """Remove by either host_port or container_port belonging to instance_id."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "DELETE FROM port_mappings WHERE instance_id = ? "
+                "AND (host_port = ? OR container_port = ?)",
+                (instance_id, port_number, port_number),
+            )
+        return cur.rowcount > 0
+
+    # ---- Redeem / Promo Codes ----
+    def create_code(
+        self,
+        guild_id: int,
+        specs: Specs,
+        *,
+        duration_seconds: int | None,
+        max_uses: int,
+        created_by: int,
+        custom_code: str | None = None,
+    ) -> RedeemCode:
+        if max_uses < 1 or max_uses > 1000:
+            raise UserError("Code uses must be between 1 and 1000.")
+        now = utc_now()
+        with self._lock, self._db:
+            if custom_code:
+                allowed_chars = set(string.ascii_uppercase + string.digits + "-")
+                code = custom_code.strip().upper()
+                if not (4 <= len(code) <= 32 and set(code) <= allowed_chars):
+                    raise UserError("Custom code may only contain A–Z, 0–9, and `-` (4–32 chars).")
+                exists = self._db.execute(
+                    "SELECT 1 FROM redeem_codes WHERE code = ?", (code,)
+                ).fetchone()
+                if exists:
+                    raise UserError(f"Code `{code}` already exists.")
+            else:
+                for _ in range(20):
+                    candidate = _random_code()
+                    exists = self._db.execute(
+                        "SELECT 1 FROM redeem_codes WHERE code = ?", (candidate,)
+                    ).fetchone()
+                    if not exists:
+                        code = candidate
+                        break
+                else:
+                    raise RuntimeError("Could not allocate unique redeem code")
+            self._db.execute(
+                "INSERT INTO redeem_codes "
+                "(code, guild_id, ram_gb, cpu, disk_gb, duration_seconds, "
+                "max_uses, uses, created_by, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?)",
+                (
+                    code,
+                    str(guild_id),
+                    specs.ram_gb,
+                    specs.cpu,
+                    specs.disk_gb,
+                    duration_seconds,
+                    max_uses,
+                    str(created_by),
+                    now,
+                ),
+            )
+            row = self._db.execute("SELECT * FROM redeem_codes WHERE code = ?", (code,)).fetchone()
+        return RedeemCode.from_row(row)
+
+    def get_code(self, guild_id: int, raw_code: str) -> RedeemCode:
+        code = raw_code.strip().upper()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM redeem_codes WHERE code = ? AND guild_id = ?",
+                (code, str(guild_id)),
+            ).fetchone()
+        if row is None:
+            raise UserError("Invalid or unknown redeem code.")
+        return RedeemCode.from_row(row)
+
+    def list_codes(self, guild_id: int) -> list[RedeemCode]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM redeem_codes WHERE guild_id = ? ORDER BY created_at DESC",
+                (str(guild_id),),
+            ).fetchall()
+        return [RedeemCode.from_row(r) for r in rows]
+
+    def delete_code(self, guild_id: int, raw_code: str) -> bool:
+        code = raw_code.strip().upper()
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "DELETE FROM redeem_codes WHERE code = ? AND guild_id = ?",
+                (code, str(guild_id)),
+            )
+        return cur.rowcount > 0
+
+    def check_code_redeemable(self, guild_id: int, raw_code: str, user_id: int) -> RedeemCode:
+        promo = self.get_code(guild_id, raw_code)
+        if promo.uses >= promo.max_uses:
+            raise UserError("This redeem code has already been fully claimed.")
+        with self._lock:
+            already = self._db.execute(
+                "SELECT 1 FROM redeem_claims WHERE code = ? AND user_id = ?",
+                (promo.code, str(user_id)),
+            ).fetchone()
+        if already is not None:
+            raise UserError("You have already redeemed this code.")
+        return promo
+
+    def consume_code(
+        self, guild_id: int, raw_code: str, user_id: int, instance_id: str
+    ) -> RedeemCode:
+        code = raw_code.strip().upper()
+        with self._lock, self._db:
+            promo = self.check_code_redeemable(guild_id, code, user_id)
+            cur = self._db.execute(
+                "UPDATE redeem_codes SET uses = uses + 1 "
+                "WHERE code = ? AND guild_id = ? AND uses < max_uses",
+                (promo.code, str(guild_id)),
+            )
+            if cur.rowcount != 1:
+                raise UserError("This redeem code has just run out of uses.")
+            self._db.execute(
+                "INSERT INTO redeem_claims (code, user_id, instance_id, claimed_at) "
+                "VALUES (?, ?, ?, ?)",
+                (promo.code, str(user_id), instance_id, utc_now()),
+            )
+            row = self._db.execute(
+                "SELECT * FROM redeem_codes WHERE code = ?", (promo.code,)
+            ).fetchone()
+        return RedeemCode.from_row(row)
+
+    # ---- SSH Public Keys ----
+    def set_ssh_key(self, user_id: int, pubkey: str) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO ssh_keys (user_id, pubkey, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(user_id) DO UPDATE SET pubkey = excluded.pubkey, "
+                "updated_at = excluded.updated_at",
+                (str(user_id), pubkey, utc_now()),
+            )
+
+    def get_ssh_key(self, user_id: int) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT pubkey FROM ssh_keys WHERE user_id = ?", (str(user_id),)
+            ).fetchone()
+        return str(row[0]) if row else None
+
+    def clear_ssh_key(self, user_id: int) -> bool:
+        with self._lock, self._db:
+            cur = self._db.execute("DELETE FROM ssh_keys WHERE user_id = ?", (str(user_id),))
+        return cur.rowcount > 0

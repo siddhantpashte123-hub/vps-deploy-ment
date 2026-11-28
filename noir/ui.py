@@ -7,8 +7,9 @@ from pathlib import Path
 import discord
 
 from .errors import NoirError, UserError
-from .models import Actor, HostStatus, Instance, LiveStats, Specs
+from .models import Actor, HostStatus, Instance, LiveStats, PortMapping, RedeemCode, Specs
 from .os_catalog import DEFAULT_OS, OS_CHOICES, os_choice, os_label
+from .templates import TEMPLATES
 
 log = logging.getLogger(__name__)
 
@@ -179,8 +180,9 @@ def instance_embed(
         f"({disk_pct:.1f}%)\n"
         f"> {access_line}"
     )
+    title_suffix = f" · `{instance.name}`" if instance.name else ""
     embed = discord.Embed(
-        title=f"VPS #{max(1, index)} — VMID `{_vmid_short(instance.id)}`",
+        title=f"VPS #{max(1, index)} — VMID `{_vmid_short(instance.id)}`{title_suffix}",
         description=description,
         color=color,
     )
@@ -194,10 +196,10 @@ def empty_embed() -> discord.Embed:
         description=(
             "`noir-empty`\n"
             "> **Status** Idle · No VPS Assigned\n\n"
-            "> **Deploy** `!deploy 1 1 1 @user [30d]` *(Admin Only)*\n"
-            "> **Images** `ubuntu-24.04` • `ubuntu-22.04` • `debian-12`\n"
+            "> **Deploy** `!deploy 1 1 1 @user [30d]` *(Admin)* • `!redeem <code>` *(Promo Code)*\n"
+            "> **Images** `ubuntu-24.04` • `ubuntu-22.04` • `debian-12` • `alpine-3.20`\n"
             "> **Control** Server Channel or Bot DMs (`!manage`)\n\n"
-            "> Ask a server administrator to provision a root VPS for you."
+            "> Ask a server administrator for a VPS or redeem a promo code with `!redeem`."
         ),
         color=WARNING,
     )
@@ -212,8 +214,8 @@ def panel_hub_embed(guild_name: str, count: int) -> discord.Embed:
             f"`noir-fleet-{count}`\n"
             f"> **Status** Online · Ready\n\n"
             f"> **Active Fleet** {count} Provisioned VPS Instance{plural}\n"
-            f"> **OS Images** Ubuntu 24.04 LTS • Ubuntu 22.04 LTS • Debian 12\n"
-            f"> **Direct Messages** `!manage` • `!help` anytime in Bot DMs\n\n"
+            f"> **OS Images** Ubuntu 24.04 • Ubuntu 22.04 • Debian 12 • Alpine 3.20\n"
+            f"> **Direct Messages** `!manage` • `!redeem <code>` • `!help` in Bot DMs\n\n"
             f"> Click **My VPS** to open your console here or "
             f"**Control in DM** to manage privately."
         ),
@@ -228,20 +230,21 @@ def help_embed(settings) -> discord.Embed:
         description=(
             "`noir-cli-guide`\n"
             "> **Status** Online · Server & DM Control Enabled\n\n"
-            "> **Owner / DM** `!manage [id]` • `!panel` • `!backup <id>` • "
-            "`!restore <id>` • `!delete <id>`\n"
-            "> **Admin Deploy** `!deploy RAM CPU DISK [@user] [30d]` "
-            "*(Ubuntu 24.04 / 22.04 / Debian 12)*\n"
-            "> **Admin Fleet** `!status` • `!list [@user]` • "
-            "`!suspend <id> [reason]` • `!unsuspend <id>`\n"
-            "> **Admin Plans** `!resize <id> RAM CPU DISK` • `!renew <id> <30d|never>` • "
-            "`!transfer <id> @user` • `!delete @user`\n"
-            "> **Slash Commands** `/manage` • `/panel` • `/status` • "
-            "`/list` • `/deploy` • `/suspend`\n\n"
+            "> **Owner / DM** `!manage [id]` • `!rename <id> <name>` • `!port <id>` • "
+            "`!redeem <code>`\n"
+            "> **Dev & Snapshots** `!exec <id> <cmd>` • `!logs <id>` • `!template <id> [name]` • "
+            "`!sshkey <pubkey|clear>` • `!backup <id>` • `!restore <id>` • `!transfer <id> @user`\n"
+            "> **Admin Deploy** `!deploy RAM CPU DISK [@user] [30d]` • "
+            "`!gencode RAM CPU DISK [30d] [uses]` • `!codes`\n"
+            "> **Admin Fleet** `!status` • `!list [@user]` • `!suspend <id> [reason]` • "
+            "`!unsuspend <id>`\n"
+            "> **Admin Plans** `!resize <id> R C D` • `!renew <id> <30d|never>` • `!delete @user`\n"
+            "> **Slash Commands** `/manage` • `/redeem` • `/panel` • `/status` • "
+            "`/list` • `/deploy` • `/gencode` • `/suspend`\n\n"
             f"> **Per-User Limit** {settings.max_per_user} VPS • **Max Plan** "
             f"{settings.max_ram_gb}GB RAM / {settings.max_cpu} CPU / "
             f"{settings.max_disk_gb}GB Disk\n"
-            "> **Tip** Send `!manage` directly to NOIR in **DMs** anytime."
+            "> **Tip** Send `!manage` or `!redeem` directly to NOIR in **DMs** anytime."
         ),
         color=COLOR,
     )
@@ -307,8 +310,9 @@ def fleet_embed(
         rows = []
         for idx, item in enumerate(chunk, start=page * page_size + 1):
             exp = f" • Exp {_discord_time(item.expires_at, 'R')}" if item.expires_at else ""
+            nick = f" (`{item.name}`)" if item.name else ""
             rows.append(
-                f"> **#{idx}** `{item.id}` • <@{item.owner_id}> • **{item.os}** • "
+                f"> **#{idx}** `{item.id}`{nick} • <@{item.owner_id}> • **{item.os}** • "
                 f"{item.ram_gb}G/{item.cpu}C/{item.disk_gb}G • `{item.status.upper()}`{exp}"
             )
         body = "\n".join(rows)
@@ -383,6 +387,102 @@ def action_card_embed(
         color=color,
     )
     return _brand(embed, "NOIR Cloud")
+
+
+def ports_embed(
+    instance: Instance,
+    ports: list[PortMapping],
+    *,
+    public_ip: str = "",
+    max_ports: int = 5,
+) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    host_display = public_ip or "host-ip"
+    if not ports:
+        rows = (
+            "> *No public ports forwarded yet. Click **Forward Port** "
+            "or run `!port add <id> <port>`.*"
+        )
+    else:
+        rows = "\n".join(
+            f"> `{host_display}:{p.host_port}` → `container:{p.container_port}` *(TCP)*"
+            for p in ports
+        )
+    embed = discord.Embed(
+        title=f"Port Forwarding — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** {len(ports)} / {max_ports} Public TCP Ports Active\n\n"
+            f"{rows}\n\n"
+            f"> Bind your app inside the VPS to `0.0.0.0:<container_port>` "
+            "so external traffic reaches it."
+        ),
+        color=ACCENT if ports else MUTED,
+    )
+    return _brand(embed, "NOIR Cloud • Public Port Forwarding")
+
+
+def logs_embed(
+    instance: Instance, output: str, *, title_prefix: str = "Live Processes & Ports"
+) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    cleaned = (output or "(no output)").replace("```", "'''").strip()[:1700]
+    embed = discord.Embed(
+        title=f"{title_prefix} — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** Snapshot Captured · OS `{instance.os}`\n\n"
+            f"```text\n{cleaned}\n```"
+        ),
+        color=ACCENT,
+    )
+    return _brand(embed, "NOIR Cloud • Container Telemetry")
+
+
+def codes_embed(codes: list[RedeemCode]) -> discord.Embed:
+    if not codes:
+        body = "> *No promo/plan codes created yet. Generate one with `!gencode 1 1 2 30d 5`.*"
+    else:
+        lines = []
+        for c in codes[:20]:
+            if c.duration_seconds and c.duration_seconds % 86400 == 0:
+                dur = f"{c.duration_seconds // 86400}d"
+            elif c.duration_seconds:
+                dur = f"{c.duration_seconds // 3600}h"
+            else:
+                dur = "Permanent"
+            state = "ACTIVE" if c.remaining > 0 else "DEPLETED"
+            lines.append(
+                f"> `{c.code}` • **{c.ram_gb}G/{c.cpu}C/{c.disk_gb}G** • `{dur}` • "
+                f"Uses `{c.uses}/{c.max_uses}` (`{state}`)"
+            )
+        body = "\n".join(lines)
+    embed = discord.Embed(
+        title="Redeemable Plan Codes",
+        description=(
+            f"`noir-promo-codes`\n"
+            f"> **Total Codes** {len(codes)} • **Redeem Command** `!redeem <code>`\n\n"
+            f"{body}"
+        ),
+        color=COLOR if codes else MUTED,
+    )
+    return _brand(embed, "NOIR Cloud • Promo & Trial Codes")
+
+
+def templates_embed(instance: Instance) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    rows = "\n".join(f"> `{t.id}` — **{t.label}** (`{t.directory}`)" for t in TEMPLATES)
+    embed = discord.Embed(
+        title=f"Starter Templates — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** Choose a 1-Click Project Scaffold\n\n"
+            f"{rows}\n\n"
+            f"> Files are created directly inside `/home/noir` without touching your other folders."
+        ),
+        color=ACCENT,
+    )
+    return _brand(embed, "NOIR Cloud • 1-Click App Starters")
 
 
 def sshx_embed(instance: Instance, *, closed: bool = False) -> discord.Embed:
@@ -1115,7 +1215,11 @@ class ManageView(discord.ui.View):
         if len(instances) > 1:
             options = [
                 discord.SelectOption(
-                    label=f"VPS #{idx} — {i.id}",
+                    label=(
+                        f"VPS #{idx} — {i.name} ({i.id})"[:100]
+                        if i.name
+                        else f"VPS #{idx} — {i.id}"
+                    ),
                     description=f"{os_label(i.os)} · {i.specs.label()} · {i.status}"[:100],
                     value=i.id,
                     default=i.id == self.selected,
@@ -1136,7 +1240,16 @@ class ManageView(discord.ui.View):
     def _sync_button_states(self) -> None:
         inst = self.current()
         suspended = bool(inst and inst.is_suspended)
-        for btn in (self.start, self.stop, self.restart, self.sshx, self.reinstall):
+        for btn in (
+            self.start,
+            self.stop,
+            self.restart,
+            self.sshx,
+            self.reinstall,
+            self.ports,
+            self.logs_btn,
+            self.templates_btn,
+        ):
             btn.disabled = suspended
         self.backup.disabled = suspended and not self.actor.is_admin
         self.restore.disabled = (suspended and not self.actor.is_admin) or not bool(
@@ -1348,6 +1461,62 @@ class ManageView(discord.ui.View):
         )
         view.message = await interaction.original_response()
 
+    @discord.ui.button(label="Ports", style=discord.ButtonStyle.secondary, row=3)
+    async def ports(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            instance = await self.manager.get(self.actor, self.selected)
+            mappings = await self.manager.list_ports(self.actor, instance.id)
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = PortsView(self.bot, self.actor, instance, mappings)
+        await interaction.response.send_message(
+            embed=ports_embed(
+                instance,
+                mappings,
+                public_ip=self.bot.settings.public_ip,
+                max_ports=self.bot.settings.max_ports_per_vps,
+            ),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Rename", style=discord.ButtonStyle.secondary, row=3)
+    async def rename_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        inst = self.current()
+        if inst is None:
+            await interaction.response.send_message("No VPS selected.", ephemeral=True)
+            return
+        await interaction.response.send_modal(RenameModal(self, inst))
+
+    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=3)
+    async def logs_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            instance, out = await self.manager.inspect_processes(self.actor, self.selected)
+            await interaction.followup.send(
+                embed=logs_embed(instance, out),
+                ephemeral=True,
+            )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="Templates", style=discord.ButtonStyle.secondary, row=3)
+    async def templates_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        try:
+            instance = await self.manager.get(self.actor, self.selected)
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = TemplateView(self.bot, self.actor, instance)
+        await interaction.response.send_message(
+            embed=templates_embed(instance),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
     @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=3)
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -1392,7 +1561,7 @@ class ManageView(discord.ui.View):
         )
         view.message = await interaction.original_response()
 
-    @discord.ui.button(label="Open in DM", style=discord.ButtonStyle.secondary, row=3)
+    @discord.ui.button(label="Open in DM", style=discord.ButtonStyle.secondary, row=4)
     async def send_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         try:
@@ -1675,3 +1844,309 @@ class FleetView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+
+
+class RenameModal(discord.ui.Modal, title="Rename VPS"):
+    nickname = discord.ui.TextInput(
+        label="Custom Nickname (leave blank to clear)",
+        placeholder="e.g. Music-Bot or Prod-API",
+        required=False,
+        max_length=28,
+    )
+
+    def __init__(self, parent_view: ManageView, instance: Instance):
+        super().__init__()
+        self.parent_view = parent_view
+        self.instance = instance
+        if instance.name:
+            self.nickname.default = instance.name
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True)
+        try:
+            updated = await self.parent_view.manager.rename(
+                self.parent_view.actor, self.instance.id, str(self.nickname.value or "")
+            )
+            self.parent_view._replace_instance(updated)
+            live = await self.parent_view.manager.stats(self.parent_view.actor, updated.id)
+            await self.parent_view._edit_panel(
+                interaction,
+                instance_embed(updated, live, index=self.parent_view.current_index()),
+                self.parent_view,
+            )
+            label = f"Renamed to `{updated.name}`." if updated.name else "Nickname cleared."
+            await interaction.followup.send(label, ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class AddPortModal(discord.ui.Modal, title="Forward Container Port"):
+    container_port = discord.ui.TextInput(
+        label="Container TCP Port (1–65535)",
+        placeholder="e.g. 3000, 8000, 25565",
+        required=True,
+        max_length=5,
+    )
+
+    def __init__(self, ports_view: PortsView):
+        super().__init__()
+        self.ports_view = ports_view
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        raw = str(self.container_port.value or "").strip()
+        if not raw.isdigit():
+            await interaction.followup.send(
+                "Enter a whole port number such as `3000` or `8000`.", ephemeral=True
+            )
+            return
+        try:
+            mapping = await self.ports_view.bot.manager.add_port(
+                self.ports_view.actor, self.ports_view.instance.id, int(raw)
+            )
+            await self.ports_view.reload_and_edit(interaction)
+            host_ip = self.ports_view.bot.settings.public_ip or "host-ip"
+            await interaction.followup.send(
+                f"Forwarded `{host_ip}:{mapping.host_port}` → "
+                f"`container:{mapping.container_port}`.",
+                ephemeral=True,
+            )
+            if hasattr(self.ports_view.bot, "audit_log"):
+                await self.ports_view.bot.audit_log(
+                    "Port Forwarded",
+                    actor_id=self.ports_view.actor.user_id,
+                    instance=self.ports_view.instance,
+                    detail=f"`{mapping.host_port}` → `{mapping.container_port}/tcp`",
+                    color=ACCENT,
+                )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class PortsView(discord.ui.View):
+    def __init__(self, bot, actor: Actor, instance: Instance, ports: list[PortMapping]):
+        super().__init__(timeout=300)
+        self.bot = bot
+        self.actor = actor
+        self.instance = instance
+        self.ports = ports
+        self.message: discord.Message | None = None
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        self.clear_items()
+        if self.ports:
+            options = [
+                discord.SelectOption(
+                    label=f"Remove {p.host_port} -> container:{p.container_port}",
+                    value=str(p.host_port),
+                )
+                for p in self.ports[:25]
+            ]
+            select = discord.ui.Select(
+                placeholder="Remove a forwarded port…", options=options, row=0
+            )
+            select.callback = self._remove_port  # type: ignore[method-assign]
+            self.add_item(select)
+        add_btn = discord.ui.Button(
+            label="Forward Port",
+            style=discord.ButtonStyle.primary,
+            disabled=len(self.ports) >= self.bot.settings.max_ports_per_vps,
+            row=1,
+        )
+        add_btn.callback = self._open_modal  # type: ignore[method-assign]
+        self.add_item(add_btn)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.actor.user_id:
+            await interaction.response.send_message(
+                "This port panel belongs to another user.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def reload_and_edit(self, interaction: discord.Interaction) -> None:
+        self.instance = await self.bot.manager.get(self.actor, self.instance.id)
+        self.ports = await self.bot.manager.list_ports(self.actor, self.instance.id)
+        self._rebuild()
+        embed = ports_embed(
+            self.instance,
+            self.ports,
+            public_ip=self.bot.settings.public_ip,
+            max_ports=self.bot.settings.max_ports_per_vps,
+        )
+        if self.message is not None:
+            try:
+                await self.message.edit(embed=embed, view=self)
+                return
+            except discord.HTTPException:
+                pass
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    async def _open_modal(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_modal(AddPortModal(self))
+
+    async def _remove_port(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        values = interaction.data.get("values", [])  # type: ignore[union-attr]
+        if not values:
+            return
+        try:
+            port_num = int(values[0])
+            await self.bot.manager.remove_port(self.actor, self.instance.id, port_num)
+            await self.reload_and_edit(interaction)
+            await interaction.followup.send(f"Removed forwarded port `{port_num}`.", ephemeral=True)
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class TemplateView(discord.ui.View):
+    def __init__(self, bot, actor: Actor, instance: Instance):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.actor = actor
+        self.instance = instance
+        self.message: discord.Message | None = None
+        options = [
+            discord.SelectOption(
+                label=t.label,
+                value=t.id,
+                description=t.summary[:100],
+            )
+            for t in TEMPLATES
+        ]
+        select = discord.ui.Select(placeholder="Install a starter template…", options=options)
+        select.callback = self._install  # type: ignore[method-assign]
+        self.add_item(select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.actor.user_id:
+            await interaction.response.send_message(
+                "This template selector is not yours.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _install(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        values = interaction.data.get("values", [])  # type: ignore[union-attr]
+        if not values:
+            return
+        try:
+            inst, directory = await self.bot.manager.install_template(
+                self.actor, self.instance.id, values[0]
+            )
+            await interaction.followup.send(
+                embed=action_card_embed(
+                    "Starter Template Installed",
+                    inst,
+                    status_line=f"Scaffolded · `{values[0]}`",
+                    detail_line=(
+                        f"**Ready** — open **Console** and `cd {directory}` to start building"
+                    ),
+                    color=SUCCESS,
+                ),
+                ephemeral=True,
+            )
+            if hasattr(self.bot, "audit_log"):
+                await self.bot.audit_log(
+                    "Starter Template Installed",
+                    actor_id=self.actor.user_id,
+                    instance=inst,
+                    detail=f"Template `{values[0]}` in `{directory}`",
+                    color=ACCENT,
+                )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class RedeemOSView(discord.ui.View):
+    """Member selects OS to deploy their redeemed promo/plan code."""
+
+    def __init__(self, bot, actor: Actor, promo: RedeemCode):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.actor = actor
+        self.promo = promo
+        self.handled = False
+        self.message: discord.Message | None = None
+        self.select = _os_select("Choose an OS for your redeemed VPS…")
+        self.select.callback = self._choose  # type: ignore[method-assign]
+        self.add_item(self.select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.actor.user_id:
+            await interaction.response.send_message(
+                "Only the member who ran `!redeem` can choose the OS.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _choose(self, interaction: discord.Interaction) -> None:
+        if self.handled:
+            await interaction.response.send_message("Already redeeming.", ephemeral=True)
+            return
+        values = interaction.data.get("values", [])  # type: ignore[union-attr]
+        try:
+            choice = os_choice(values[0] if values else "")
+        except UserError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        self.handled = True
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        await interaction.response.edit_message(
+            embed=deploy_progress_embed(
+                self.promo.specs, "validate", 5, choice.id, self.actor.user_id
+            ),
+            view=self,
+        )
+        self.stop()
+        message = self.message or interaction.message
+        if message is None:
+            return
+        last_edit = 0.0
+
+        async def on_progress(stage: str, percent: int) -> None:
+            nonlocal last_edit
+            now = time.monotonic()
+            if percent < 100 and now - last_edit < 1.5:
+                return
+            last_edit = now
+            await message.edit(
+                embed=deploy_progress_embed(
+                    self.promo.specs, stage, percent, choice.id, self.actor.user_id
+                )
+            )
+
+        try:
+            instance = await self.bot.manager.redeem_deploy(
+                self.actor, self.promo.code, choice.id, on_progress
+            )
+        except Exception as exc:
+            log.exception("Redeem deploy failed")
+            await message.edit(
+                embed=deploy_failure_embed(
+                    self.promo.specs, error_text(exc), choice.id, self.actor.user_id
+                ),
+                view=None,
+            )
+            return
+        if hasattr(self.bot, "audit_log"):
+            await self.bot.audit_log(
+                "Promo Code Redeemed",
+                actor_id=self.actor.user_id,
+                instance=instance,
+                detail=f"Code `{self.promo.code}`",
+                color=SUCCESS,
+            )
+        in_dm = interaction.guild_id is None
+        stats = await self.bot.manager.stats(self.actor, instance.id)
+        view = ManageView(self.bot, self.actor, [instance], instance.id, in_dm=in_dm)
+        await message.edit(
+            content=None,
+            embed=instance_embed(instance, stats, index=1),
+            attachments=[],
+            view=view,
+        )
+        view.message = message

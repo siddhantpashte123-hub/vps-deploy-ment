@@ -57,6 +57,10 @@ class Settings:
     host_ram_mb: int
     host_cpu: int
     log_channel_id: int | None = None
+    public_ip: str = ""
+    port_start: int = 20000
+    port_end: int = 20199
+    max_ports_per_vps: int = 5
 
     def image_for(self, os_key: str) -> str:
         os_choice(os_key)
@@ -87,6 +91,11 @@ class Settings:
         ubuntu_image = os.getenv("NOIR_IMAGE_UBUNTU", legacy_image or "noir-vps:local").strip()
         ubuntu22_image = os.getenv("NOIR_IMAGE_UBUNTU_22", "noir-vps:ubuntu-22.04").strip()
         debian_image = os.getenv("NOIR_IMAGE_DEBIAN", "noir-vps:debian-12").strip()
+        alpine_image = os.getenv("NOIR_IMAGE_ALPINE", "noir-vps:alpine-3.20").strip()
+        port_start = _int("NOIR_PORT_START", 20000, 1024, 65000)
+        port_end = _int("NOIR_PORT_END", 20199, 1024, 65535)
+        if port_end < port_start:
+            raise UserError("NOIR_PORT_END must be greater than or equal to NOIR_PORT_START.")
         settings = cls(
             token=token,
             client_id=_optional_id("NOIR_CLIENT_ID"),
@@ -98,6 +107,7 @@ class Settings:
                     DEFAULT_OS: ubuntu_image,
                     "ubuntu-22.04": ubuntu22_image,
                     "debian-12": debian_image,
+                    "alpine-3.20": alpine_image,
                 }
             ),
             network=os.getenv("NOIR_NETWORK", "noir-vps").strip(),
@@ -111,6 +121,10 @@ class Settings:
             or max(512, int(_physical_ram_mb() * 0.75)),
             host_cpu=_int("NOIR_HOST_CPU", 0, 0, 1024) or (os.cpu_count() or 1),
             log_channel_id=_optional_id("NOIR_LOG_CHANNEL_ID"),
+            public_ip=os.getenv("NOIR_PUBLIC_IP", "").strip(),
+            port_start=port_start,
+            port_end=port_end,
+            max_ports_per_vps=_int("NOIR_MAX_PORTS_PER_VPS", 5, 1, 50),
         )
         if not settings.network:
             raise UserError("NOIR_NETWORK cannot be empty.")

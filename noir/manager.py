@@ -15,13 +15,18 @@ from .models import (
     HostStatus,
     Instance,
     LiveStats,
+    PortMapping,
+    RedeemCode,
     Specs,
+    clean_vps_name,
     future_iso,
     utc_now,
     valid_id,
+    validate_ssh_pubkey,
 )
 from .os_catalog import DEFAULT_OS, os_choice
 from .store import Store
+from .templates import get_template
 
 log = logging.getLogger(__name__)
 
@@ -104,6 +109,20 @@ class Manager:
             # A failed Discord edit must never fail an otherwise healthy deploy.
             log.exception("Deployment progress update failed")
 
+    async def _ports_dict(self, instance_id: str) -> dict[int, int]:
+        mappings = await asyncio.to_thread(self.store.list_ports, instance_id)
+        return {m.container_port: m.host_port for m in mappings}
+
+    async def _apply_owner_ssh_key(self, instance_id: str, owner_id: int) -> None:
+        pubkey = await asyncio.to_thread(self.store.get_ssh_key, owner_id)
+        if pubkey:
+            fn = getattr(self.backend, "write_ssh_key", None)
+            if fn is not None:
+                try:
+                    await asyncio.to_thread(fn, instance_id, pubkey)
+                except Exception:
+                    log.debug("Could not write SSH key into %s", instance_id, exc_info=True)
+
     async def deploy(
         self,
         actor: Actor,
@@ -113,8 +132,9 @@ class Manager:
         owner_id: int | None = None,
         os_key: str = DEFAULT_OS,
         expires_at: str | None = None,
+        allow_redeem: bool = False,
     ) -> Instance:
-        if not actor.is_admin:
+        if not actor.is_admin and not allow_redeem:
             raise AccessDenied("Only admins can create VPSes.")
         os_choice(os_key)
         owner_id = actor.user_id if owner_id is None else owner_id
@@ -179,6 +199,7 @@ class Manager:
                     os_key,
                 )
                 await self._emit(on_progress, "ready", 98)
+                await self._apply_owner_ssh_key(instance.id, owner_id)
                 result = await asyncio.to_thread(
                     self.store.update, instance.id, container_id=container_id, status="running"
                 )
@@ -221,6 +242,7 @@ class Manager:
                 os_choice(target_os)
                 await asyncio.to_thread(self.store.update, instance_id, status="reinstalling")
                 try:
+                    ports = await self._ports_dict(instance_id)
                     await asyncio.to_thread(self.backend.remove_all, instance_id)
                     await asyncio.to_thread(
                         self.backend.recreate_disk, instance_id, instance.disk_gb
@@ -233,7 +255,9 @@ class Manager:
                         instance.guild_id,
                         None,
                         target_os,
+                        ports,
                     )
+                    await self._apply_owner_ssh_key(instance_id, instance.owner_id)
                     return await asyncio.to_thread(
                         self.store.update,
                         instance_id,
@@ -336,6 +360,7 @@ class Manager:
                     await asyncio.to_thread(resize_fn, instance_id, specs.disk_gb)
             was_running = instance.status == "running"
             was_suspended = instance.is_suspended
+            ports = await self._ports_dict(instance_id)
             container_id = await asyncio.to_thread(
                 self.backend.recreate_container,
                 instance_id,
@@ -344,6 +369,7 @@ class Manager:
                 instance.guild_id,
                 was_running and not was_suspended,
                 instance.os,
+                ports,
             )
             new_status = "suspended" if was_suspended else ("running" if was_running else "stopped")
             return await asyncio.to_thread(
@@ -366,7 +392,11 @@ class Manager:
                 if duration_seconds is None
                 else future_iso(duration_seconds, base_iso=instance.expires_at)
             )
-            fields: dict[str, str | int | None] = {"expires_at": new_expiry}
+            fields: dict[str, str | int | None] = {
+                "expires_at": new_expiry,
+                "warned_24h": 0,
+                "warned_1h": 0,
+            }
             if (
                 instance.is_suspended
                 and instance.suspended_reason == "Expired"
@@ -457,6 +487,238 @@ class Manager:
                     expired.append(updated)
         return expired
 
+    async def sweep_expiry_warnings(self) -> list[tuple[Instance, str]]:
+        """Return [(instance, '24h'|'1h')] once per threshold before expiry."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        instances = await asyncio.to_thread(self.store.list)
+        alerts: list[tuple[Instance, str]] = []
+        for instance in instances:
+            if not instance.expires_at or instance.status in {"suspended", "deleting"}:
+                continue
+            try:
+                exp = datetime.fromisoformat(instance.expires_at)
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+            except ValueError:
+                continue
+            remaining = (exp - now).total_seconds()
+            if remaining <= 0:
+                continue
+            if remaining <= 3600 and not instance.warned_1h:
+                updated = await asyncio.to_thread(
+                    self.store.update, instance.id, warned_1h=1, warned_24h=1
+                )
+                alerts.append((updated, "1h"))
+            elif remaining <= 86400 and not instance.warned_24h:
+                updated = await asyncio.to_thread(self.store.update, instance.id, warned_24h=1)
+                alerts.append((updated, "24h"))
+        return alerts
+
+    async def rename(self, actor: Actor, instance_id: str, raw_name: str | None) -> Instance:
+        cleaned = clean_vps_name(raw_name)
+        async with self._locks[instance_id]:
+            await self.get(actor, instance_id)
+            return await asyncio.to_thread(self.store.update, instance_id, name=cleaned)
+
+    async def list_ports(self, actor: Actor, instance_id: str) -> list[PortMapping]:
+        await self.get(actor, instance_id)
+        return await asyncio.to_thread(self.store.list_ports, instance_id)
+
+    async def add_port(self, actor: Actor, instance_id: str, container_port: int) -> PortMapping:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended and not actor.is_admin:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            mapping = await asyncio.to_thread(
+                self.store.allocate_port,
+                instance.id,
+                container_port,
+                port_start=self.settings.port_start,
+                port_end=self.settings.port_end,
+                max_per_vps=self.settings.max_ports_per_vps,
+            )
+            ports = await self._ports_dict(instance.id)
+            was_running = instance.status == "running"
+            container_id = await asyncio.to_thread(
+                self.backend.recreate_container,
+                instance.id,
+                instance.specs,
+                instance.owner_id,
+                instance.guild_id,
+                was_running and not instance.is_suspended,
+                instance.os,
+                ports,
+            )
+            if was_running and not instance.is_suspended:
+                await self._apply_owner_ssh_key(instance.id, instance.owner_id)
+            await asyncio.to_thread(self.store.update, instance.id, container_id=container_id)
+            return mapping
+
+    async def remove_port(self, actor: Actor, instance_id: str, port_number: int) -> Instance:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended and not actor.is_admin:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            removed = await asyncio.to_thread(self.store.remove_port, instance.id, port_number)
+            if not removed:
+                raise UserError(f"Port `{port_number}` is not forwarded on `{instance.id}`.")
+            ports = await self._ports_dict(instance.id)
+            was_running = instance.status == "running"
+            container_id = await asyncio.to_thread(
+                self.backend.recreate_container,
+                instance.id,
+                instance.specs,
+                instance.owner_id,
+                instance.guild_id,
+                was_running and not instance.is_suspended,
+                instance.os,
+                ports,
+            )
+            if was_running and not instance.is_suspended:
+                await self._apply_owner_ssh_key(instance.id, instance.owner_id)
+            return await asyncio.to_thread(
+                self.store.update, instance.id, container_id=container_id
+            )
+
+    async def create_code(
+        self,
+        actor: Actor,
+        specs: Specs,
+        *,
+        duration_seconds: int | None = None,
+        max_uses: int = 1,
+        custom_code: str | None = None,
+    ) -> RedeemCode:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can generate redeem codes.")
+        specs.validate(self.settings.max_ram_gb, self.settings.max_cpu, self.settings.max_disk_gb)
+        return await asyncio.to_thread(
+            self.store.create_code,
+            actor.guild_id,
+            specs,
+            duration_seconds=duration_seconds,
+            max_uses=max_uses,
+            created_by=actor.user_id,
+            custom_code=custom_code,
+        )
+
+    async def list_codes(self, actor: Actor) -> list[RedeemCode]:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can view redeem codes.")
+        return await asyncio.to_thread(self.store.list_codes, actor.guild_id)
+
+    async def delete_code(self, actor: Actor, raw_code: str) -> None:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can delete redeem codes.")
+        ok = await asyncio.to_thread(self.store.delete_code, actor.guild_id, raw_code)
+        if not ok:
+            raise UserError(f"Code `{raw_code}` was not found.")
+
+    async def validate_redeem(self, actor: Actor, raw_code: str) -> RedeemCode:
+        mine = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
+        if len(mine) >= self.settings.max_per_user:
+            raise UserError(f"You already have the maximum of {self.settings.max_per_user} VPSes.")
+        return await asyncio.to_thread(
+            self.store.check_code_redeemable, actor.guild_id, raw_code, actor.user_id
+        )
+
+    async def redeem_deploy(
+        self,
+        actor: Actor,
+        raw_code: str,
+        os_key: str,
+        on_progress: ProgressCallback | None = None,
+    ) -> Instance:
+        promo = await self.validate_redeem(actor, raw_code)
+        expires_at = (
+            future_iso(promo.duration_seconds) if promo.duration_seconds is not None else None
+        )
+        instance = await self.deploy(
+            actor,
+            promo.specs,
+            on_progress,
+            owner_id=actor.user_id,
+            os_key=os_key,
+            expires_at=expires_at,
+            allow_redeem=True,
+        )
+        try:
+            await asyncio.to_thread(
+                self.store.consume_code, actor.guild_id, promo.code, actor.user_id, instance.id
+            )
+        except Exception:
+            await asyncio.to_thread(self.backend.remove_all, instance.id)
+            await asyncio.to_thread(self.store.delete, instance.id)
+            raise
+        return instance
+
+    async def exec_command(
+        self, actor: Actor, instance_id: str, shell_cmd: str
+    ) -> tuple[Instance, int, str]:
+        cleaned = shell_cmd.strip()
+        if not cleaned or len(cleaned) > 500:
+            raise UserError("Command must be between 1 and 500 characters.")
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            fn = getattr(self.backend, "exec_command", None)
+            if fn is None:
+                raise BackendError("Quick exec is not supported by this backend.")
+            code, output = await asyncio.to_thread(fn, instance.id, cleaned)
+            return instance, code, output
+
+    async def inspect_processes(self, actor: Actor, instance_id: str) -> tuple[Instance, str]:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            fn = getattr(self.backend, "inspect_processes", None)
+            if fn is None:
+                raise BackendError("Process inspection is not supported by this backend.")
+            output = await asyncio.to_thread(fn, instance.id)
+            return instance, output
+
+    async def install_template(
+        self, actor: Actor, instance_id: str, template_id: str
+    ) -> tuple[Instance, str]:
+        tmpl = get_template(template_id)
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            fn = getattr(self.backend, "exec_command", None)
+            if fn is None:
+                raise BackendError("Template installer is not supported by this backend.")
+            code, output = await asyncio.to_thread(fn, instance.id, tmpl.install_script)
+            if code != 0:
+                raise BackendError(f"Template setup failed: {output[:200]}")
+            return instance, tmpl.directory
+
+    async def set_ssh_key(self, actor: Actor, raw_pubkey: str) -> tuple[str, int]:
+        pubkey = validate_ssh_pubkey(raw_pubkey)
+        await asyncio.to_thread(self.store.set_ssh_key, actor.user_id, pubkey)
+        owned = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
+        applied = 0
+        fn = getattr(self.backend, "write_ssh_key", None)
+        if fn is not None:
+            for inst in owned:
+                if inst.status == "running":
+                    try:
+                        await asyncio.to_thread(fn, inst.id, pubkey)
+                        applied += 1
+                    except Exception:
+                        log.debug("SSH key sync skipped for %s", inst.id, exc_info=True)
+        return pubkey, applied
+
+    async def clear_ssh_key(self, actor: Actor) -> bool:
+        return await asyncio.to_thread(self.store.clear_ssh_key, actor.user_id)
+
+    async def get_ssh_key(self, actor: Actor) -> str | None:
+        return await asyncio.to_thread(self.store.get_ssh_key, actor.user_id)
+
     async def sshx(self, actor: Actor, instance_id: str) -> tuple[Instance, str]:
         async with self._locks[instance_id]:
             instance = await self.get(actor, instance_id)
@@ -515,6 +777,7 @@ class Manager:
                 was_suspended = instance.is_suspended
                 running = instance.status not in {"stopped", "suspended"}
                 try:
+                    ports = await self._ports_dict(instance.id)
                     container_id = await asyncio.to_thread(
                         self.backend.recreate_container,
                         instance.id,
@@ -523,7 +786,10 @@ class Manager:
                         instance.guild_id,
                         running,
                         instance.os,
+                        ports,
                     )
+                    if running:
+                        await self._apply_owner_ssh_key(instance.id, instance.owner_id)
                     new_state = (
                         "suspended" if was_suspended else ("running" if running else "stopped")
                     )

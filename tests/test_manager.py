@@ -322,3 +322,67 @@ async def test_expiry_sweep_and_renew_auto_unsuspends(manager, actor, store):
 
     cleared = await manager.renew(actor, inst.id, None)
     assert cleared.expires_at is None
+
+
+async def test_port_forwarding_allocates_and_preserves_across_resize(
+    manager, actor, member_actor, backend
+):
+    inst = await manager.deploy(actor, Specs(1, 1, 2), owner_id=member_actor.user_id)
+    mapping = await manager.add_port(member_actor, inst.id, 3000)
+    assert mapping.host_port == 20000
+    assert backend.items[inst.id]["ports"] == {3000: 20000}
+
+    # Resize keeps port binding
+    await manager.resize(actor, inst.id, Specs(2, 2, 4))
+    assert backend.items[inst.id]["ports"] == {3000: 20000}
+
+    # Remove port
+    await manager.remove_port(member_actor, inst.id, 20000)
+    assert backend.items[inst.id]["ports"] == {}
+
+
+async def test_redeem_codes_single_claim_and_depletion(manager, actor, backend):
+    promo = await manager.create_code(actor, Specs(1, 1, 2), duration_seconds=86400 * 7, max_uses=1)
+    claimer = Actor(555666777, actor.guild_id, False)
+    inst = await manager.redeem_deploy(claimer, promo.code, "alpine-3.20")
+    assert inst.owner_id == claimer.user_id
+    assert inst.os == "alpine-3.20"
+    assert inst.expires_at is not None
+
+    # Depleted / duplicate claim rejected
+    with pytest.raises(UserError, match="claimed|already"):
+        await manager.validate_redeem(claimer, promo.code)
+
+
+async def test_rename_sshkey_exec_logs_templates_and_expiry_warnings(
+    manager, actor, member_actor, backend, store
+):
+    from noir.models import future_iso
+
+    soon = future_iso(1800)  # 30 minutes -> triggers 1h warning once
+    inst = await manager.deploy(
+        actor, Specs(1, 1, 2), owner_id=member_actor.user_id, expires_at=soon
+    )
+    renamed = await manager.rename(member_actor, inst.id, "Music-Bot")
+    assert renamed.name == "Music-Bot"
+
+    pubkey = (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB noir@dev"
+    )
+    _, synced = await manager.set_ssh_key(member_actor, pubkey)
+    assert synced == 1
+    assert backend.items[inst.id]["ssh_key"] == pubkey
+
+    _, code, out = await manager.exec_command(member_actor, inst.id, "uname -a")
+    assert code == 0
+    assert "uname -a" in out
+
+    _, logs = await manager.inspect_processes(member_actor, inst.id)
+    assert "PROCESSES" in logs
+
+    _, directory = await manager.install_template(member_actor, inst.id, "python-bot")
+    assert directory == "/home/noir/python-bot"
+
+    alerts = await manager.sweep_expiry_warnings()
+    assert [(i.id, win) for i, win in alerts] == [(inst.id, "1h")]
+    assert await manager.sweep_expiry_warnings() == []

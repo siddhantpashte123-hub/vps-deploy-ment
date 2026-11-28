@@ -15,13 +15,20 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_os_catalog_and_labels():
     assert DEFAULT_OS == "ubuntu-24.04"
-    assert {choice.id for choice in OS_CHOICES} == {"ubuntu-24.04", "ubuntu-22.04", "debian-12"}
+    assert {choice.id for choice in OS_CHOICES} == {
+        "ubuntu-24.04",
+        "ubuntu-22.04",
+        "debian-12",
+        "alpine-3.20",
+    }
     assert os_label("ubuntu-24.04") == "Ubuntu 24.04 LTS"
     assert os_label("ubuntu-22.04") == "Ubuntu 22.04 LTS"
     assert os_label("debian-12") == "Debian 12 (bookworm)"
+    assert os_label("alpine-3.20") == "Alpine Linux 3.20"
     assert os_choice("debian-12").base_image == "debian:12"
     assert os_choice("ubuntu-22.04").base_image == "ubuntu:22.04"
-    with pytest.raises(UserError, match="ubuntu-24.04, ubuntu-22.04, debian-12"):
+    assert os_choice("alpine-3.20").base_image == "alpine:3.20"
+    with pytest.raises(UserError, match="ubuntu-24.04, ubuntu-22.04, debian-12, alpine-3.20"):
         os_choice("windows-11")
 
 
@@ -31,18 +38,22 @@ def test_per_os_images_and_legacy_fallback(monkeypatch):
     monkeypatch.delenv("NOIR_IMAGE_UBUNTU", raising=False)
     monkeypatch.delenv("NOIR_IMAGE_UBUNTU_22", raising=False)
     monkeypatch.delenv("NOIR_IMAGE_DEBIAN", raising=False)
+    monkeypatch.delenv("NOIR_IMAGE_ALPINE", raising=False)
     settings = Settings.load()
     assert settings.image_for("ubuntu-24.04") == "legacy:ubuntu"
     assert settings.image_for("ubuntu-22.04") == "noir-vps:ubuntu-22.04"
     assert settings.image_for("debian-12") == "noir-vps:debian-12"
+    assert settings.image_for("alpine-3.20") == "noir-vps:alpine-3.20"
     monkeypatch.setenv("NOIR_IMAGE_UBUNTU", "custom:ubuntu")
     monkeypatch.setenv("NOIR_IMAGE_UBUNTU_22", "custom:ubuntu22")
     monkeypatch.setenv("NOIR_IMAGE_DEBIAN", "custom:debian")
+    monkeypatch.setenv("NOIR_IMAGE_ALPINE", "custom:alpine")
     settings = Settings.load()
     assert settings.images == {
         "ubuntu-24.04": "custom:ubuntu",
         "ubuntu-22.04": "custom:ubuntu22",
         "debian-12": "custom:debian",
+        "alpine-3.20": "custom:alpine",
     }
     with pytest.raises(UserError):
         settings.image_for("fedora-99")
@@ -50,7 +61,10 @@ def test_per_os_images_and_legacy_fallback(monkeypatch):
         settings.images["debian-12"] = "mutated"
 
 
-@pytest.mark.parametrize("name", ["NOIR_IMAGE_UBUNTU", "NOIR_IMAGE_UBUNTU_22", "NOIR_IMAGE_DEBIAN"])
+@pytest.mark.parametrize(
+    "name",
+    ["NOIR_IMAGE_UBUNTU", "NOIR_IMAGE_UBUNTU_22", "NOIR_IMAGE_DEBIAN", "NOIR_IMAGE_ALPINE"],
+)
 def test_invalid_per_os_image_rejected(monkeypatch, name):
     monkeypatch.setenv("DISCORD_TOKEN", "x" * 60)
     monkeypatch.setenv(name, "bad image")
@@ -93,6 +107,7 @@ def test_runtime_dockerfiles_and_installer_build_all_contexts():
         "ubuntu-24.04": ("ubuntu", "noir-vps:local"),
         "ubuntu-22.04": ("ubuntu22", "noir-vps:ubuntu-22.04"),
         "debian-12": ("debian", "noir-vps:debian-12"),
+        "alpine-3.20": ("alpine", "noir-vps:alpine-3.20"),
     }
     for choice in OS_CHOICES:
         directory, tag = dirs_and_tags[choice.id]
