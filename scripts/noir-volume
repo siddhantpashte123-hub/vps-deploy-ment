@@ -37,14 +37,14 @@ def fail(message: str) -> None:
     raise SystemExit(1)
 
 
-def run(*args: str) -> str:
-    result = subprocess.run(args, capture_output=True, text=True, timeout=150, check=False)
+def run(*args: str, timeout: int = 150) -> str:
+    result = subprocess.run(args, capture_output=True, text=True, timeout=timeout, check=False)
     if result.returncode:
         raise RuntimeError(f"{os.path.basename(args[0])} failed: {result.stderr.strip()[:200]}")
     return result.stdout
 
 
-def run_mount(*args: str) -> str:
+def run_mount(*args: str, timeout: int = 20) -> str:
     """Perform mount/umount in PID 1's mount namespace so Docker can see it.
 
     Some systemd/service configurations put the bot in a private mount
@@ -54,8 +54,8 @@ def run_mount(*args: str) -> str:
     nsenter = shutil.which("nsenter")
     pid1_mnt = "/proc/1/ns/mnt"
     if nsenter and os.path.exists(pid1_mnt):
-        return run(nsenter, "--mount=" + pid1_mnt, "--", *args)
-    return run(*args)
+        return run(nsenter, "--mount=" + pid1_mnt, "--", *args, timeout=timeout)
+    return run(*args, timeout=timeout)
 
 
 def safe_dir(path: str, create: bool = False) -> None:
@@ -251,17 +251,17 @@ def mount_existing(instance_id: str) -> None:
 
 def unmount_cleanly(mount: str) -> None:
     """Unmount a VPS loop mount reliably after Docker container teardown."""
-    for _ in range(8):
+    for _ in range(4):
         if not mounted(mount):
             return
         try:
-            run_mount("umount", mount)
+            run_mount("umount", mount, timeout=5)
             return
-        except RuntimeError:
-            time.sleep(0.35)
+        except (RuntimeError, subprocess.TimeoutExpired):
+            time.sleep(0.3)
     if mounted(mount):
-        run_mount("umount", "-l", mount)
-        for _ in range(10):
+        run_mount("umount", "-l", mount, timeout=5)
+        for _ in range(8):
             if not mounted(mount):
                 return
             time.sleep(0.2)

@@ -774,42 +774,38 @@ class Manager:
 
     async def sshx(self, actor: Actor, instance_id: str) -> tuple[Instance, str]:
         await asyncio.to_thread(self._check_maintenance, actor)
-        async with self._locks[instance_id]:
-            instance = await self.get(actor, instance_id)
-            if instance.is_suspended:
-                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
-            if instance.net_locked and not actor.is_admin:
-                raise UserError("Outbound network is locked on this VPS by an administrator.")
-            url = await asyncio.to_thread(self.backend.sshx, instance_id)
-            return instance, url
+        instance = await self.get(actor, instance_id)
+        if instance.is_suspended:
+            raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+        if instance.net_locked and not actor.is_admin:
+            raise UserError("Outbound network is locked on this VPS by an administrator.")
+        url = await asyncio.to_thread(self.backend.sshx, instance_id)
+        return instance, url
 
     async def close_sshx(self, actor: Actor, instance_id: str) -> None:
-        async with self._locks[instance_id]:
-            await self.get(actor, instance_id)
-            await asyncio.to_thread(self.backend.close_sshx, instance_id)
+        await self.get(actor, instance_id)
+        await asyncio.to_thread(self.backend.close_sshx, instance_id)
 
     async def pinggy_ssh(
         self, actor: Actor, instance_id: str
     ) -> tuple[Instance, PinggySSHSession]:
         await asyncio.to_thread(self._check_maintenance, actor)
-        async with self._locks[instance_id]:
-            instance = await self.get(actor, instance_id)
-            if instance.is_suspended:
-                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
-            if instance.net_locked and not actor.is_admin:
-                raise UserError("Outbound network is locked on this VPS by an administrator.")
-            fn = getattr(self.backend, "pinggy_ssh", None)
-            if fn is None:
-                raise BackendError("Pinggy SSH is not supported by this backend.")
-            session = await asyncio.to_thread(fn, instance_id)
-            return instance, session
+        instance = await self.get(actor, instance_id)
+        if instance.is_suspended:
+            raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+        if instance.net_locked and not actor.is_admin:
+            raise UserError("Outbound network is locked on this VPS by an administrator.")
+        fn = getattr(self.backend, "pinggy_ssh", None)
+        if fn is None:
+            raise BackendError("Pinggy SSH is not supported by this backend.")
+        session = await asyncio.to_thread(fn, instance_id)
+        return instance, session
 
     async def close_pinggy_ssh(self, actor: Actor, instance_id: str) -> None:
-        async with self._locks[instance_id]:
-            await self.get(actor, instance_id)
-            fn = getattr(self.backend, "close_pinggy_ssh", None)
-            if fn is not None:
-                await asyncio.to_thread(fn, instance_id)
+        await self.get(actor, instance_id)
+        fn = getattr(self.backend, "close_pinggy_ssh", None)
+        if fn is not None:
+            await asyncio.to_thread(fn, instance_id)
 
     async def pinggy_http(
         self, actor: Actor, instance_id: str, port: int
@@ -817,24 +813,22 @@ class Manager:
         if not 1 <= port <= 65535:
             raise UserError("Port must be between 1 and 65535.")
         await asyncio.to_thread(self._check_maintenance, actor)
-        async with self._locks[instance_id]:
-            instance = await self.get(actor, instance_id)
-            if instance.is_suspended:
-                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
-            if instance.net_locked and not actor.is_admin:
-                raise UserError("Outbound network is locked on this VPS by an administrator.")
-            fn = getattr(self.backend, "pinggy_http", None)
-            if fn is None:
-                raise BackendError("HTTPS tunneling is not supported by this backend.")
-            url = await asyncio.to_thread(fn, instance_id, port)
-            return instance, url
+        instance = await self.get(actor, instance_id)
+        if instance.is_suspended:
+            raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+        if instance.net_locked and not actor.is_admin:
+            raise UserError("Outbound network is locked on this VPS by an administrator.")
+        fn = getattr(self.backend, "pinggy_http", None)
+        if fn is None:
+            raise BackendError("HTTPS tunneling is not supported by this backend.")
+        url = await asyncio.to_thread(fn, instance_id, port)
+        return instance, url
 
     async def close_pinggy_http(self, actor: Actor, instance_id: str, port: int) -> None:
-        async with self._locks[instance_id]:
-            await self.get(actor, instance_id)
-            fn = getattr(self.backend, "close_pinggy_http", None)
-            if fn is not None:
-                await asyncio.to_thread(fn, instance_id, port)
+        await self.get(actor, instance_id)
+        fn = getattr(self.backend, "close_pinggy_http", None)
+        if fn is not None:
+            await asyncio.to_thread(fn, instance_id, port)
 
     async def share_vps(
         self, actor: Actor, instance_id: str, subuser_id: int

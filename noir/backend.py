@@ -114,7 +114,7 @@ class DockerBackend:
         self.storage_mode = "unknown"
         if client is None:
             try:
-                client = docker.from_env(timeout=120)
+                client = docker.from_env(timeout=35)
             except DockerException as exc:
                 raise BackendError(
                     "Cannot connect to Docker. Start Docker and add the bot user to docker."
@@ -436,7 +436,7 @@ class DockerBackend:
         container = self.get(instance_id)
         if container is not None:
             try:
-                container.stop(timeout=3)
+                container.kill()
             except (DockerException, OSError):
                 pass
             try:
@@ -444,7 +444,7 @@ class DockerBackend:
             except DockerNotFound:
                 pass
             except (DockerException, OSError) as exc:
-                raise BackendError("Docker could not remove the container.") from exc
+                raise BackendError(f"Docker could not remove container: {str(exc)[:140]}") from exc
         self._helper("delete", instance_id)
 
     def recreate_disk(self, instance_id: str, disk_gb: int) -> None:
@@ -481,13 +481,9 @@ class DockerBackend:
         self._exec(instance_id, ["/usr/local/bin/noir-sshx", "stop"])
 
     def _ensure_pinggy_helper(self, instance_id: str) -> None:
-        """Install /usr/local/bin/noir-pinggy on older containers if not yet present."""
-        code, _ = self._exec(
-            instance_id, ["test", "-x", "/usr/local/bin/noir-pinggy"]
-        )
-        if code == 0:
-            return
+        """Keep /usr/local/bin/noir-pinggy synced with the host runtime script."""
         import base64
+        import hashlib
         from pathlib import Path
 
         helper_src = Path(__file__).resolve().parent.parent / "runtime" / "noir-pinggy"
@@ -495,7 +491,14 @@ class DockerBackend:
             raise UserError(
                 "Pinggy helper missing on host. Re-run `install.sh` with `NOIR_REPAIR=1`."
             )
-        b64 = base64.b64encode(helper_src.read_bytes()).decode("ascii")
+        raw = helper_src.read_bytes()
+        expected_sha = hashlib.sha256(raw).hexdigest()
+        code, cur_out = self._exec(
+            instance_id, ["sha256sum", "/usr/local/bin/noir-pinggy"]
+        )
+        if code == 0 and cur_out.strip().startswith(expected_sha):
+            return
+        b64 = base64.b64encode(raw).decode("ascii")
         install_cmd = (
             f"printf '%s' '{b64}' | base64 -d > /usr/local/bin/noir-pinggy && "
             "chmod 0755 /usr/local/bin/noir-pinggy"
