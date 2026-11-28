@@ -12,10 +12,13 @@ from noir.errors import AccessDenied, UserError
 from noir.models import Actor, Instance, Specs, utc_now
 from noir.ui import (
     ConfirmView,
+    ConsoleChoiceView,
     DeployOSView,
     HostStatusView,
+    HTTPSTunnelView,
     ManageView,
     PanelHubView,
+    PinggySSHView,
     ReinstallOSView,
     SSHXView,
     UserDeleteView,
@@ -581,18 +584,44 @@ async def test_manage_reinstall_opens_clean_os_choice_card(
     assert "> **Status** Awaiting OS Selection" in embed_dict["description"]
 
 
-async def test_console_opens_clean_sshx_embed_and_closes_in_place(
+async def test_console_opens_2_option_selector_for_pinggy_ssh_and_sshx(
     bot, guild, admin_member, manager, actor
 ):
     instance = await manager.deploy(actor, Specs(1, 1, 1))
     view = ManageView(bot, actor, [instance], instance.id)
     interaction = make_interaction(admin_member, actor.guild_id)
     await view.sshx.callback(interaction)
-    sent = interaction.followup.send.call_args.kwargs
-    sshx_view = sent["view"]
-    assert isinstance(sshx_view, SSHXView)
+    sent = interaction.response.send_message.call_args.kwargs
+    choice_view = sent["view"]
+    assert isinstance(choice_view, ConsoleChoiceView)
     assert sent["ephemeral"] is True
-    embed_dict = sent["embed"].to_dict()
+    labels = [getattr(c, "label", None) for c in choice_view.children]
+    assert labels == ["SSH", "SSHX"]
+    assert all(getattr(c, "emoji", None) is None for c in choice_view.children)
+
+    # Option 1: SSH via Pinggy.io
+    ssh_ix = make_interaction(admin_member, actor.guild_id)
+    await choice_view.open_ssh.callback(ssh_ix)
+    ssh_edited = ssh_ix.edit_original_response.call_args.kwargs
+    pinggy_view = ssh_edited["view"]
+    assert isinstance(pinggy_view, PinggySSHView)
+    ssh_embed = ssh_edited["embed"].to_dict()
+    assert "Pinggy.io" in ssh_embed["title"]
+    assert "ssh -p " in ssh_embed["description"] and "root@" in ssh_embed["description"]
+
+    close_ssh_ix = make_interaction(admin_member, actor.guild_id)
+    await pinggy_view.close_ssh.callback(close_ssh_ix)
+    closed_ssh = close_ssh_ix.edit_original_response.call_args.kwargs["embed"].to_dict()
+    assert "Closed · Tunnel Terminated" in closed_ssh["description"]
+
+    # Option 2: SSHX Web Terminal
+    choice_view2 = ConsoleChoiceView(bot, actor, instance)
+    sshx_ix = make_interaction(admin_member, actor.guild_id)
+    await choice_view2.open_sshx.callback(sshx_ix)
+    sshx_edited = sshx_ix.edit_original_response.call_args.kwargs
+    sshx_view = sshx_edited["view"]
+    assert isinstance(sshx_view, SSHXView)
+    embed_dict = sshx_edited["embed"].to_dict()
     assert embed_dict["title"].startswith("Root Console — VMID")
     assert "> **Status** Active · Private Root Shell" in embed_dict["description"]
     assert "sshx.io/s/" not in str(embed_dict)
@@ -769,3 +798,74 @@ async def test_promo_gencode_redeem_port_rename_exec_logs_template_and_sshkey(
 
     codes_ctx = await invoke(bot, guild, admin_member, "codes")
     assert code in codes_ctx.send.call_args.kwargs["embed"].description
+
+
+async def test_tunnel_share_autobackup_gitdeploy_maintenance_announce_and_netlock(
+    bot, guild, admin_member, target_member, manager, actor, store
+):
+    owner = make_member(TARGET_ID, guild, admin=False)
+    teammate_id = 444555666777888999
+    teammate = make_member(teammate_id, guild, admin=False)
+    guild.get_member = Mock(
+        side_effect=lambda uid: {
+            TARGET_ID: owner,
+            teammate_id: teammate,
+            admin_member.id: admin_member,
+        }.get(uid)
+    )
+    inst = await manager.deploy(actor, Specs(1, 1, 2), owner_id=TARGET_ID)
+
+    # 1. Pinggy HTTPS Tunnel command + close button
+    tun_ctx = await invoke(bot, guild, owner, "tunnel", f"{inst.id} 3000")
+    tun_view = tun_ctx.send.call_args.kwargs["view"]
+    assert isinstance(tun_view, HTTPSTunnelView)
+    assert "pinggy.link" in tun_ctx.send.call_args.kwargs["embed"].description
+    close_tun_ix = make_interaction(owner, actor.guild_id)
+    await tun_view.close_tunnel.callback(close_tun_ix)
+    assert (
+        "Closed · HTTPS Tunnel Stopped"
+        in close_tun_ix.edit_original_response.call_args.kwargs["embed"].description
+    )
+
+    # 2. Sub-user sharing: teammate can run !logs / !exec, cannot !delete or !share
+    await invoke(bot, guild, owner, "share", f"{inst.id} <@{teammate_id}>")
+    logs_ctx = await invoke(bot, guild, teammate, "logs", inst.id)
+    assert "PROCESSES" in logs_ctx.send.call_args.kwargs["embed"].description
+    with pytest.raises(AccessDenied):
+        await invoke(bot, guild, teammate, "delete", inst.id)
+    await invoke(bot, guild, owner, "unshare", f"{inst.id} <@{teammate_id}>")
+    with pytest.raises(AccessDenied):
+        await invoke(bot, guild, teammate, "logs", inst.id)
+
+    # 3. Auto-backup toggle & Git auto-deploy
+    ab_ctx = await invoke(bot, guild, owner, "autobackup", f"{inst.id} on")
+    assert "Every 24 Hours" in ab_ctx.send.call_args.kwargs["embed"].description
+    assert store.get(inst.id).autobackup == 1
+
+    git_ctx = await invoke(
+        bot, guild, owner, "gitdeploy", f"{inst.id} https://github.com/octocat/Hello-World"
+    )
+    assert "/home/noir/Hello-World" in git_ctx.send.call_args.kwargs["embed"].description
+
+    # 4. Network lock blocks outbound tunnels for non-admins until unlocked
+    await invoke(bot, guild, admin_member, "netlock", f"{inst.id} on")
+    assert store.get(inst.id).net_locked == 1
+    with pytest.raises(UserError, match="Outbound network is locked"):
+        await invoke(bot, guild, owner, "tunnel", f"{inst.id} 3000")
+    await invoke(bot, guild, admin_member, "netlock", f"{inst.id} off")
+    assert store.get(inst.id).net_locked == 0
+
+    # 5. Maintenance mode blocks non-admin actions, then lifts cleanly
+    await invoke(bot, guild, admin_member, "maintenance", "on Host kernel upgrade")
+    with pytest.raises(UserError, match="Host maintenance in progress"):
+        await invoke(bot, guild, owner, "tunnel", f"{inst.id} 3000")
+    await invoke(bot, guild, admin_member, "maintenance", "off")
+
+    # 6. Fleet broadcast DMs active owners
+    dm_mock = SimpleNamespace(send=AsyncMock())
+    owner_user = SimpleNamespace(create_dm=AsyncMock(return_value=dm_mock))
+    bot.get_user = Mock(return_value=owner_user)
+    ann_ctx = await invoke(bot, guild, admin_member, "announce", "Node reboot completed!")
+    assert "Delivered to `1` / `1`" in ann_ctx.send.call_args.kwargs["embed"].description
+    dm_mock.send.assert_awaited_once()
+

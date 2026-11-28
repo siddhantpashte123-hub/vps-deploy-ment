@@ -22,8 +22,10 @@ from .ui import (
     DeployOSView,
     FleetView,
     HostStatusView,
+    HTTPSTunnelView,
     ManageView,
     PanelHubView,
+    PinggySSHView,
     PortsView,
     RedeemOSView,
     TemplateView,
@@ -37,10 +39,12 @@ from .ui import (
     fleet_embed,
     help_embed,
     host_status_embed,
+    https_tunnel_embed,
     instance_embed,
     logs_embed,
     os_choice_embed,
     panel_hub_embed,
+    pinggy_ssh_embed,
     ports_embed,
     templates_embed,
     user_delete_embed,
@@ -217,6 +221,20 @@ class NoirBot(commands.Bot):
                     )
             except Exception:
                 log.debug("Could not DM owner %s about expired VPS %s", inst.owner_id, inst.id)
+
+        try:
+            auto_snaps = await self.manager.sweep_autobackups()
+        except Exception:
+            log.debug("Auto-backup sweep skipped", exc_info=True)
+            auto_snaps = []
+        for inst in auto_snaps:
+            await self.audit_log(
+                "Scheduled Auto-Backup Saved",
+                actor_id=None,
+                instance=inst,
+                detail="24h `/home/noir` snapshot archived automatically",
+                color=SUCCESS,
+            )
 
         if (
             self.settings.log_channel_id
@@ -547,7 +565,7 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
             view.message = message
             return
         if cpu is None and disk is None:
-            instance = await manager.get(actor, first)
+            instance = await manager.get(actor, first, owner_only=True)
         elif cpu is not None and disk is not None:
             try:
                 specs = Specs(int(first), cpu, disk)
@@ -1083,6 +1101,362 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
         )
         embed.set_footer(text="NOIR Cloud • SSH Key Sync")
         await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+
+    def _parse_toggle(raw: str) -> bool:
+        val = raw.strip().lower()
+        if val in {"on", "enable", "enabled", "true", "1", "yes"}:
+            return True
+        if val in {"off", "disable", "disabled", "false", "0", "no"}:
+            return False
+        raise UserError("Expected `on` or `off`.")
+
+    @bot.command(name="ssh", ignore_extra=False)
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def ssh_command(ctx: commands.Context, instance_id: str | None = None):
+        """Open a direct Pinggy.io TCP SSH root tunnel and receive private credentials."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if instance_id is None:
+            instances = await manager.list(actor)
+            if not instances:
+                raise UserError("You have no VPSes to connect to.")
+            target_id = instances[0].id
+        else:
+            target_id = instance_id
+        instance, session = await manager.pinggy_ssh(actor, target_id)
+        await bot.audit_log(
+            "Root SSH Tunnel Opened (Pinggy)",
+            actor_id=actor.user_id,
+            instance=instance,
+            detail=f"`{session.host}:{session.port}`",
+            color=ACCENT,
+        )
+        view = PinggySSHView(manager, actor, instance, session)
+        if ctx.guild is None:
+            view.message = await ctx.send(
+                embed=pinggy_ssh_embed(instance, session),
+                view=view,
+                reference=ctx.message,
+                mention_author=False,
+            )
+            return
+        try:
+            dm = await ctx.author.create_dm()
+            view.message = await dm.send(
+                embed=pinggy_ssh_embed(instance, session),
+                view=view,
+            )
+            await ctx.send(
+                embed=action_card_embed(
+                    "Root SSH Sent to DMs",
+                    instance,
+                    status_line="Active · Pinggy.io TCP Tunnel",
+                    detail_line=(
+                        "**Check your DMs** for your private `ssh -p ...` command & password"
+                    ),
+                    color=SUCCESS,
+                ),
+                reference=ctx.message,
+                mention_author=False,
+            )
+        except discord.Forbidden as exc:
+            raise UserError(
+                "Enable DMs from server members, or click **Console** → **SSH** on `!manage`."
+            ) from exc
+
+    @bot.command(name="tunnel", ignore_extra=False)
+    @commands.cooldown(1, 15, commands.BucketType.user)
+    async def tunnel_command(ctx: commands.Context, instance_id: str, port_or_action: str):
+        """Expose a container HTTP port as a public HTTPS URL via Pinggy.io."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if not port_or_action.isdigit():
+            raise UserError(
+                "Usage: `!tunnel <vps_id> <http_port>` (for example `!tunnel noir-... 3000`)."
+            )
+        port = int(port_or_action)
+        instance, url = await manager.pinggy_http(actor, instance_id, port)
+        await bot.audit_log(
+            "HTTPS Tunnel Opened (Pinggy)",
+            actor_id=actor.user_id,
+            instance=instance,
+            detail=f"Port `{port}` → `{url}`",
+            color=ACCENT,
+        )
+        view = HTTPSTunnelView(manager, actor, instance, port, url)
+        view.message = await ctx.send(
+            embed=https_tunnel_embed(instance, port, url),
+            view=view,
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="share", ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def share_command(
+        ctx: commands.Context, instance_id: str, member_raw: str | None = None
+    ):
+        """Grant a teammate sub-user access (!share <vps_id> @user) or view current sub-users."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if member_raw is None:
+            inst = await manager.get(actor, instance_id)
+            subs = await manager.list_subusers(actor, instance_id)
+            sub_list = ", ".join(f"<@{u}>" for u in subs) if subs else "None"
+            await ctx.send(
+                embed=action_card_embed(
+                    "Shared Team Access",
+                    inst,
+                    status_line=f"{len(subs)} Sub-User(s)",
+                    detail_line=f"**Sub-Users** {sub_list}",
+                    color=COLOR,
+                ),
+                reference=ctx.message,
+                mention_author=False,
+            )
+            return
+        uid = mention_id(member_raw)
+        if uid is None:
+            raise UserError("Usage: `!share <vps_id> @user`.")
+        if ctx.guild is not None:
+            m = ctx.guild.get_member(uid)
+            if m is not None and m.bot:
+                raise UserError("Cannot share a VPS with a bot account.")
+        inst, subs = await manager.share_vps(actor, instance_id, uid)
+        await bot.audit_log(
+            "VPS Shared (Sub-User Added)",
+            actor_id=actor.user_id,
+            instance=inst,
+            detail=f"Added <@{uid}>",
+            color=ACCENT,
+        )
+        await ctx.send(
+            embed=action_card_embed(
+                "Sub-User Access Granted",
+                inst,
+                status_line=f"Shared with <@{uid}> ({len(subs)} total)",
+                detail_line=(
+                    "**Permissions** Start / Stop / Restart / Console / Logs / Exec "
+                    "*(Delete & Reinstall stay owner-only)*"
+                ),
+                color=SUCCESS,
+            ),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="unshare", ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def unshare_command(ctx: commands.Context, instance_id: str, member_raw: str):
+        """Revoke a teammate's sub-user access (!unshare <vps_id> @user)."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        uid = mention_id(member_raw)
+        if uid is None:
+            raise UserError("Usage: `!unshare <vps_id> @user`.")
+        inst, subs = await manager.unshare_vps(actor, instance_id, uid)
+        await bot.audit_log(
+            "VPS Sub-User Removed",
+            actor_id=actor.user_id,
+            instance=inst,
+            detail=f"Removed <@{uid}>",
+            color=WARNING,
+        )
+        await ctx.send(
+            embed=action_card_embed(
+                "Sub-User Access Revoked",
+                inst,
+                status_line=f"Removed <@{uid}> ({len(subs)} remaining)",
+                detail_line="**Updated** — teammate can no longer access this VPS",
+                color=WARNING,
+            ),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="autobackup", ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def autobackup_command(ctx: commands.Context, instance_id: str, state: str):
+        """Toggle automatic 24-hour /home/noir snapshots (!autobackup <vps_id> <on|off>)."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        enabled = _parse_toggle(state)
+        inst = await manager.set_autobackup(actor, instance_id, enabled)
+        await ctx.send(
+            embed=action_card_embed(
+                "Scheduled Auto-Backup Updated",
+                inst,
+                status_line="Enabled · Every 24 Hours" if enabled else "Disabled",
+                detail_line=(
+                    "**Active** — `/home/noir` will be snapshotted automatically every 24h"
+                    if enabled
+                    else "**Paused** — manual **Backup** button remains available anytime"
+                ),
+                color=SUCCESS if enabled else WARNING,
+            ),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="gitdeploy", ignore_extra=False)
+    @commands.cooldown(1, 20, commands.BucketType.user)
+    async def gitdeploy_command(ctx: commands.Context, instance_id: str, repo_url: str):
+        """Clone or pull a public GitHub repo into /home/noir and install dependencies."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        inst, target_dir = await manager.git_deploy(actor, instance_id, repo_url)
+        await bot.audit_log(
+            "Git Repository Deployed",
+            actor_id=actor.user_id,
+            instance=inst,
+            detail=f"`{repo_url}` → `{target_dir}`",
+            color=ACCENT,
+        )
+        await ctx.send(
+            embed=action_card_embed(
+                "Git Repository Deployed",
+                inst,
+                status_line=f"Synced · `{target_dir}`",
+                detail_line=(
+                    f"**Ready** — repo cloned/updated in `{target_dir}` "
+                    "and dependencies checked (`requirements.txt` / `package.json`)"
+                ),
+                color=SUCCESS,
+            ),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="netlock", ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def netlock_command(ctx: commands.Context, instance_id: str, state: str):
+        """Admin-only: isolate or restore outbound container networking (!netlock <id> <on|off>)."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        locked = _parse_toggle(state)
+        inst = await manager.set_network_lock(actor, instance_id, locked)
+        await bot.audit_log(
+            "Network Lock Enabled" if locked else "Network Lock Lifted",
+            actor_id=actor.user_id,
+            instance=inst,
+            color=DANGER if locked else SUCCESS,
+        )
+        await ctx.send(
+            embed=action_card_embed(
+                "Container Network Lock",
+                inst,
+                status_line="Isolated · Outbound Blocked" if locked else "Online · Bridge Restored",
+                detail_line=(
+                    "**Quarantined** — container disconnected from Docker bridge "
+                    "without deleting files"
+                    if locked
+                    else "**Restored** — container reattached to managed bridge network"
+                ),
+                color=DANGER if locked else SUCCESS,
+            ),
+            reference=ctx.message,
+            mention_author=False,
+        )
+
+    @bot.command(name="maintenance")
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def maintenance_command(ctx: commands.Context, *, arg: str | None = None):
+        """Admin-only: toggle host maintenance mode (!maintenance on [reason] | off)."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if not actor.is_admin:
+            raise UserError("Only server administrators can manage maintenance mode.")
+        if arg is None:
+            current = await manager.get_maintenance()
+            status = f"Active — {current}" if current else "Inactive · Normal Operations"
+            embed = discord.Embed(
+                title="Host Maintenance Mode",
+                description=f"`noir-maintenance`\n> **Status** {status}",
+                color=WARNING if current else SUCCESS,
+            )
+            embed.set_footer(text="NOIR Cloud • Host Operations")
+            await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+            return
+        parts = arg.strip().split(maxsplit=1)
+        head = parts[0].lower()
+        if head in {"off", "disable", "disabled", "false", "0"}:
+            await manager.set_maintenance(actor, None)
+            await bot.audit_log(
+                "Maintenance Mode Disabled", actor_id=actor.user_id, color=SUCCESS
+            )
+            embed = discord.Embed(
+                title="Maintenance Mode Disabled",
+                description=(
+                    "`noir-maintenance-off`\n"
+                    "> **Status** Online · Member Actions Re-Enabled"
+                ),
+                color=SUCCESS,
+            )
+            embed.set_footer(text="NOIR Cloud • Host Operations")
+            await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+            return
+        reason = parts[1] if head in {"on", "enable", "enabled"} and len(parts) > 1 else (
+            "" if head in {"on", "enable", "enabled"} else arg.strip()
+        )
+        saved = await manager.set_maintenance(actor, reason)
+        await bot.audit_log(
+            "Maintenance Mode Enabled",
+            actor_id=actor.user_id,
+            detail=saved,
+            color=WARNING,
+        )
+        embed = discord.Embed(
+            title="Maintenance Mode Enabled",
+            description=(
+                "`noir-maintenance-on`\n"
+                "> **Status** Paused for Non-Admins\n\n"
+                f"> **Notice** {saved}"
+            ),
+            color=WARNING,
+        )
+        embed.set_footer(text="NOIR Cloud • Host Operations")
+        await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
+
+    @bot.command(name="announce")
+    @commands.cooldown(1, 30, commands.BucketType.user)
+    async def announce_command(ctx: commands.Context, *, message_text: str):
+        """Admin-only: broadcast an announcement DM to all active VPS owners."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        if not actor.is_admin:
+            raise UserError("Only server administrators can broadcast fleet announcements.")
+        cleaned = message_text.strip()
+        if not cleaned or len(cleaned) > 1200:
+            raise UserError("Announcement message must be between 1 and 1200 characters.")
+        fleet = await manager.list(actor)
+        owner_ids = sorted({i.owner_id for i in fleet if i.status != "deleting"})
+        notice_embed = discord.Embed(
+            title="NOIR Cloud — Host Announcement",
+            description=(
+                "`noir-fleet-broadcast`\n"
+                "> **Status** Official Fleet Notice\n\n"
+                f"> {cleaned}"
+            ),
+            color=ACCENT,
+        )
+        notice_embed.set_footer(text="NOIR Cloud • Fleet Broadcast")
+        delivered = 0
+        for uid in owner_ids:
+            try:
+                user = bot.get_user(uid) or await bot.fetch_user(uid)
+                if user is not None:
+                    dm = await user.create_dm()
+                    await dm.send(embed=notice_embed)
+                    delivered += 1
+            except Exception:
+                log.debug("Could not deliver broadcast DM to %s", uid)
+        await bot.audit_log(
+            "Fleet Announcement Sent",
+            actor_id=actor.user_id,
+            detail=f"Delivered to `{delivered}/{len(owner_ids)}` owners",
+            color=ACCENT,
+        )
+        summary = discord.Embed(
+            title="Fleet Broadcast Complete",
+            description=(
+                "`noir-fleet-broadcast`\n"
+                f"> **Status** Delivered to `{delivered}` / `{len(owner_ids)}` VPS Owners"
+            ),
+            color=SUCCESS,
+        )
+        summary.set_footer(text="NOIR Cloud • Fleet Broadcast")
+        await ctx.send(embed=summary, reference=ctx.message, mention_author=False)
 
     @bot.command(name="ping")
     async def ping(ctx: commands.Context):

@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl wget git openssh-client sudo \
+    ca-certificates curl wget git openssh-client openssh-server sudo \
     python3 python3-pip python3-venv python3-dev \
     nodejs npm build-essential \
     nano vim-tiny procps psmisc htop tmux \
@@ -16,7 +16,8 @@ RUN userdel -r ubuntu 2>/dev/null || true; \
     chown 1000:1000 /home/noir
 COPY sshx /usr/local/bin/sshx
 COPY noir-sshx /usr/local/bin/noir-sshx
-RUN chmod 0755 /usr/local/bin/sshx /usr/local/bin/noir-sshx
+COPY noir-pinggy /usr/local/bin/noir-pinggy
+RUN chmod 0755 /usr/local/bin/sshx /usr/local/bin/noir-sshx /usr/local/bin/noir-pinggy
 ENV HOME=/home/noir \
     USER=root \
     LOGNAME=root \

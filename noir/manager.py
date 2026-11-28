@@ -15,6 +15,7 @@ from .models import (
     HostStatus,
     Instance,
     LiveStats,
+    PinggySSHSession,
     PortMapping,
     RedeemCode,
     Specs,
@@ -72,23 +73,48 @@ class Manager:
         self._capacity_lock = asyncio.Lock()
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
-    def authorize(self, actor: Actor, instance: Instance) -> Instance:
+    def authorize(
+        self, actor: Actor, instance: Instance, *, owner_only: bool = False
+    ) -> Instance:
         if actor.guild_id != instance.guild_id:
             raise AccessDenied("This VPS belongs to another server.")
-        if actor.user_id != instance.owner_id and not actor.is_admin:
-            raise AccessDenied("You can manage only your own VPS.")
-        return instance
+        if actor.is_admin or actor.user_id == instance.owner_id:
+            return instance
+        if not owner_only and self.store.is_subuser(instance.id, actor.user_id):
+            return instance
+        if owner_only:
+            raise AccessDenied("Only the primary VPS owner or an admin can perform that action.")
+        raise AccessDenied("You can manage only your own VPS.")
 
-    async def get(self, actor: Actor, instance_id: str) -> Instance:
+    def _check_maintenance(self, actor: Actor) -> None:
+        if actor.is_admin:
+            return
+        reason = self.store.get_maintenance()
+        if reason is not None:
+            raise UserError(f"Host maintenance in progress: {reason}")
+
+    async def get(
+        self, actor: Actor, instance_id: str, *, owner_only: bool = False
+    ) -> Instance:
         if not valid_id(instance_id):
             raise UserError("Use a valid VPS ID, for example `noir-a1b2c3d4e5f6`.")
-        return self.authorize(actor, await asyncio.to_thread(self.store.get, instance_id))
+        return self.authorize(
+            actor,
+            await asyncio.to_thread(self.store.get, instance_id),
+            owner_only=owner_only,
+        )
 
     async def list(self, actor: Actor, *, owner_id: int | None = None) -> list[Instance]:
         if owner_id is not None and not actor.is_admin and owner_id != actor.user_id:
             raise AccessDenied("Only admins can list another member's VPSes.")
-        filter_owner = owner_id if actor.is_admin else actor.user_id
-        return await asyncio.to_thread(self.store.list, actor.guild_id, filter_owner)
+        if actor.is_admin:
+            return await asyncio.to_thread(self.store.list, actor.guild_id, owner_id)
+        owned = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
+        shared = await asyncio.to_thread(
+            self.store.list_shared_for_user, actor.guild_id, actor.user_id
+        )
+        seen = {i.id for i in owned}
+        return owned + [s for s in shared if s.id not in seen]
 
     async def matching_own(self, actor: Actor, specs: Specs) -> list[Instance]:
         instances = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
@@ -226,8 +252,10 @@ class Manager:
     async def _operation(
         self, actor: Actor, instance_id: str, action: str, os_key: str | None = None
     ) -> Instance:
+        await asyncio.to_thread(self._check_maintenance, actor)
+        owner_only = action in {"delete", "reinstall"}
         async with self._locks[instance_id]:
-            instance = await self.get(actor, instance_id)
+            instance = await self.get(actor, instance_id, owner_only=owner_only)
             if action == "delete":
                 await asyncio.to_thread(self.store.update, instance_id, status="deleting")
                 await asyncio.to_thread(self.backend.remove_all, instance_id)
@@ -617,6 +645,7 @@ class Manager:
             raise UserError(f"Code `{raw_code}` was not found.")
 
     async def validate_redeem(self, actor: Actor, raw_code: str) -> RedeemCode:
+        await asyncio.to_thread(self._check_maintenance, actor)
         mine = await asyncio.to_thread(self.store.list, actor.guild_id, actor.user_id)
         if len(mine) >= self.settings.max_per_user:
             raise UserError(f"You already have the maximum of {self.settings.max_per_user} VPSes.")
@@ -720,10 +749,13 @@ class Manager:
         return await asyncio.to_thread(self.store.get_ssh_key, actor.user_id)
 
     async def sshx(self, actor: Actor, instance_id: str) -> tuple[Instance, str]:
+        await asyncio.to_thread(self._check_maintenance, actor)
         async with self._locks[instance_id]:
             instance = await self.get(actor, instance_id)
             if instance.is_suspended:
                 raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            if instance.net_locked and not actor.is_admin:
+                raise UserError("Outbound network is locked on this VPS by an administrator.")
             url = await asyncio.to_thread(self.backend.sshx, instance_id)
             return instance, url
 
@@ -731,6 +763,196 @@ class Manager:
         async with self._locks[instance_id]:
             await self.get(actor, instance_id)
             await asyncio.to_thread(self.backend.close_sshx, instance_id)
+
+    async def pinggy_ssh(
+        self, actor: Actor, instance_id: str
+    ) -> tuple[Instance, PinggySSHSession]:
+        await asyncio.to_thread(self._check_maintenance, actor)
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            if instance.net_locked and not actor.is_admin:
+                raise UserError("Outbound network is locked on this VPS by an administrator.")
+            fn = getattr(self.backend, "pinggy_ssh", None)
+            if fn is None:
+                raise BackendError("Pinggy SSH is not supported by this backend.")
+            session = await asyncio.to_thread(fn, instance_id)
+            return instance, session
+
+    async def close_pinggy_ssh(self, actor: Actor, instance_id: str) -> None:
+        async with self._locks[instance_id]:
+            await self.get(actor, instance_id)
+            fn = getattr(self.backend, "close_pinggy_ssh", None)
+            if fn is not None:
+                await asyncio.to_thread(fn, instance_id)
+
+    async def pinggy_http(
+        self, actor: Actor, instance_id: str, port: int
+    ) -> tuple[Instance, str]:
+        if not 1 <= port <= 65535:
+            raise UserError("Port must be between 1 and 65535.")
+        await asyncio.to_thread(self._check_maintenance, actor)
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            if instance.net_locked and not actor.is_admin:
+                raise UserError("Outbound network is locked on this VPS by an administrator.")
+            fn = getattr(self.backend, "pinggy_http", None)
+            if fn is None:
+                raise BackendError("HTTPS tunneling is not supported by this backend.")
+            url = await asyncio.to_thread(fn, instance_id, port)
+            return instance, url
+
+    async def close_pinggy_http(self, actor: Actor, instance_id: str, port: int) -> None:
+        async with self._locks[instance_id]:
+            await self.get(actor, instance_id)
+            fn = getattr(self.backend, "close_pinggy_http", None)
+            if fn is not None:
+                await asyncio.to_thread(fn, instance_id, port)
+
+    async def share_vps(
+        self, actor: Actor, instance_id: str, subuser_id: int
+    ) -> tuple[Instance, list[int]]:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id, owner_only=True)
+            if subuser_id == instance.owner_id:
+                raise UserError("That member is already the primary owner of this VPS.")
+            await asyncio.to_thread(self.store.add_subuser, instance.id, subuser_id)
+            subs = await asyncio.to_thread(self.store.list_subusers, instance.id)
+            return instance, subs
+
+    async def unshare_vps(
+        self, actor: Actor, instance_id: str, subuser_id: int
+    ) -> tuple[Instance, list[int]]:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id, owner_only=True)
+            removed = await asyncio.to_thread(
+                self.store.remove_subuser, instance.id, subuser_id
+            )
+            if not removed:
+                raise UserError(f"<@{subuser_id}> does not have shared access on `{instance.id}`.")
+            subs = await asyncio.to_thread(self.store.list_subusers, instance.id)
+            return instance, subs
+
+    async def list_subusers(self, actor: Actor, instance_id: str) -> list[int]:
+        await self.get(actor, instance_id)
+        return await asyncio.to_thread(self.store.list_subusers, instance_id)
+
+    async def set_autobackup(
+        self, actor: Actor, instance_id: str, enabled: bool
+    ) -> Instance:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id, owner_only=True)
+            return await asyncio.to_thread(
+                self.store.update, instance.id, autobackup=1 if enabled else 0
+            )
+
+    async def sweep_autobackups(self) -> list[Instance]:
+        """Run daily scheduled backups for enabled running/stopped VPSes older than 24h."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        instances = await asyncio.to_thread(self.store.list)
+        backed_up: list[Instance] = []
+        fn = getattr(self.backend, "backup_home", None)
+        if fn is None:
+            return backed_up
+        for instance in instances:
+            if not instance.autobackup or instance.status in {"suspended", "deleting", "error"}:
+                continue
+            due = True
+            if instance.backup_at:
+                try:
+                    last = datetime.fromisoformat(instance.backup_at)
+                    if last.tzinfo is None:
+                        last = last.replace(tzinfo=timezone.utc)
+                    due = (now - last).total_seconds() >= 86400
+                except ValueError:
+                    due = True
+            if due:
+                async with self._locks[instance.id]:
+                    try:
+                        await asyncio.to_thread(fn, instance.id)
+                        updated = await asyncio.to_thread(
+                            self.store.update, instance.id, backup_at=utc_now()
+                        )
+                        backed_up.append(updated)
+                    except Exception:
+                        log.warning(
+                            "Scheduled autobackup failed for %s", instance.id, exc_info=True
+                        )
+        return backed_up
+
+    async def git_deploy(
+        self, actor: Actor, instance_id: str, repo_url: str
+    ) -> tuple[Instance, str]:
+        import re as _re
+        import shlex
+
+        cleaned = repo_url.strip()
+        if not _re.fullmatch(
+            r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?/?", cleaned
+        ):
+            raise UserError(
+                "Provide a public HTTPS GitHub repository URL (`https://github.com/owner/repo`)."
+            )
+        repo_name = cleaned.rstrip("/").rsplit("/", 1)[-1]
+        if repo_name.endswith(".git"):
+            repo_name = repo_name[:-4]
+        target_dir = f"/home/noir/{repo_name}"
+        quoted_url = shlex.quote(cleaned)
+        quoted_dir = shlex.quote(target_dir)
+        script = (
+            f"set -e; "
+            f"if [ -d {quoted_dir}/.git ]; then git -C {quoted_dir} pull --ff-only; "
+            f"else git clone --depth 1 {quoted_url} {quoted_dir}; fi; "
+            f"cd {quoted_dir}; "
+            f"if [ -f requirements.txt ]; then "
+            f"python3 -m venv .venv && .venv/bin/pip install -q -r requirements.txt; fi; "
+            f"if [ -f package.json ]; then npm install --omit=dev --no-audit --no-fund; fi; "
+            f"echo 'Deployed into {target_dir}'"
+        )
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            if instance.is_suspended:
+                raise UserError("This VPS is suspended — contact an admin to unsuspend it.")
+            if instance.net_locked:
+                raise UserError("Outbound network is locked on this VPS.")
+            fn = getattr(self.backend, "exec_command", None)
+            if fn is None:
+                raise BackendError("Git deploy is not supported by this backend.")
+            code, out = await asyncio.to_thread(fn, instance.id, script)
+            if code != 0:
+                raise UserError(f"Git deploy failed: {out.strip()[:220]}")
+            return instance, target_dir
+
+    async def set_network_lock(
+        self, actor: Actor, instance_id: str, locked: bool
+    ) -> Instance:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can toggle network lock.")
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id)
+            fn = getattr(self.backend, "set_network_lock", None)
+            if fn is not None:
+                await asyncio.to_thread(fn, instance.id, locked)
+            return await asyncio.to_thread(
+                self.store.update, instance.id, net_locked=1 if locked else 0
+            )
+
+    async def set_maintenance(self, actor: Actor, reason: str | None) -> str | None:
+        if not actor.is_admin:
+            raise AccessDenied("Only server administrators can toggle maintenance mode.")
+        cleaned = (reason or "").strip()[:180] if reason is not None else None
+        if reason is not None and not cleaned:
+            cleaned = "Scheduled host maintenance — back shortly."
+        await asyncio.to_thread(self.store.set_maintenance, cleaned)
+        return cleaned
+
+    async def get_maintenance(self) -> str | None:
+        return await asyncio.to_thread(self.store.get_maintenance)
 
     async def refresh(self, actor: Actor, instance_id: str) -> Instance:
         async with self._locks[instance_id]:

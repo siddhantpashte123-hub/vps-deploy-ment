@@ -1,0 +1,267 @@
+#!/usr/bin/python3
+"""Start OpenSSH sshd + a Pinggy TCP/HTTP tunnel inside the VPS container."""
+import fcntl
+import os
+import pty
+import re
+import secrets
+import signal
+import socket
+import string
+import subprocess
+import sys
+import time
+
+DIR = "/tmp/noir-pinggy"
+PID_FILE = DIR + "/pinggy.pid"
+OUT_FILE = DIR + "/pinggy.out"
+PASS_FILE = DIR + "/root.pass"
+HTTP_PID_PREFIX = DIR + "/http-"
+HTTP_OUT_PREFIX = DIR + "/http-"
+
+VALID_ID = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
+TCP_URL_RE = re.compile(
+    r"tcp://([A-Za-z0-9.-]+\.(?:pinggy\.link|pinggy\.online|pinggy\.io)):([0-9]{2,5})"
+)
+HTTPS_URL_RE = re.compile(
+    r"https://[A-Za-z0-9.-]+\.(?:pinggy\.link|pinggy\.online|pinggy\.io)"
+)
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+
+
+def _alive(pid: int, needle: bytes = b"ssh") -> bool:
+    if pid <= 1:
+        return False
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            return needle in handle.read(4096)
+    except OSError:
+        return False
+
+
+def _read_int(path: str) -> int:
+    try:
+        with open(path) as handle:
+            return int(handle.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+def _port_listening(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def _ensure_sshd() -> str:
+    os.makedirs("/run/sshd", mode=0o755, exist_ok=True)
+    os.makedirs("/etc/ssh/sshd_config.d", mode=0o755, exist_ok=True)
+    subprocess.run(["ssh-keygen", "-A"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    cfg_line = (
+        "PermitRootLogin yes\n"
+        "PasswordAuthentication yes\n"
+        "PubkeyAuthentication yes\n"
+        "UsePAM no\n"
+        "Subsystem sftp internal-sftp\n"
+    )
+    main_cfg = "/etc/ssh/sshd_config"
+    marker = "# NOIR_ROOT_SSH"
+    try:
+        existing = open(main_cfg).read() if os.path.exists(main_cfg) else ""
+    except OSError:
+        existing = ""
+    if marker not in existing:
+        with open(main_cfg, "a") as handle:
+            handle.write(f"\n{marker}\n{cfg_line}")
+
+    password = ""
+    if os.path.exists(PASS_FILE):
+        try:
+            password = open(PASS_FILE).read().strip()
+        except OSError:
+            password = ""
+    if not password:
+        alphabet = string.ascii_letters + string.digits
+        password = "".join(secrets.choice(alphabet) for _ in range(14))
+        with open(PASS_FILE, "w", opener=lambda p, f: os.open(p, f, 0o600)) as handle:
+            handle.write(password)
+        chpasswd = subprocess.Popen(
+            ["chpasswd"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        chpasswd.communicate(f"root:{password}\n".encode())
+
+    if not _port_listening(22):
+        subprocess.Popen(
+            ["/usr/sbin/sshd"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        for _ in range(20):
+            if _port_listening(22):
+                break
+            time.sleep(0.2)
+    return password
+
+
+def _spawn_pinggy_pty(remote_spec: str, target_user: str, out_path: str, pid_path: str) -> None:
+    for p in (out_path, pid_path):
+        try:
+            os.unlink(p)
+        except FileNotFoundError:
+            pass
+    # Allocate a pseudo-terminal in a child daemon so Pinggy prints its banner URL immediately
+    pid = os.fork()
+    if pid > 0:
+        with open(pid_path, "w", opener=lambda p, f: os.open(p, f, 0o600)) as handle:
+            handle.write(str(pid))
+        return
+    os.setsid()
+    master_fd, slave_fd = pty.openpty()
+    cmd = [
+        "/usr/bin/ssh",
+        "-p",
+        "443",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "LogLevel=ERROR",
+        remote_spec,
+        f"{target_user}@free.pinggy.io",
+    ]
+    proc = subprocess.Popen(
+        cmd,
+        stdin=slave_fd,
+        stdout=slave_fd,
+        stderr=slave_fd,
+        close_fds=True,
+    )
+    os.close(slave_fd)
+    with open(out_path, "wb", opener=lambda p, f: os.open(p, f, 0o600)) as sink:
+        try:
+            while proc.poll() is None:
+                try:
+                    chunk = os.read(master_fd, 1024)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                sink.write(chunk)
+                sink.flush()
+        finally:
+            try:
+                os.close(master_fd)
+            except OSError:
+                pass
+            if proc.poll() is None:
+                proc.terminate()
+    os._exit(0)
+
+
+def _kill_daemon(pid_path: str, out_path: str) -> None:
+    pid = _read_int(pid_path)
+    if pid > 1:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    for p in (pid_path, out_path):
+        try:
+            os.unlink(p)
+        except FileNotFoundError:
+            pass
+
+
+def start_ssh(instance_id: str) -> None:
+    if not VALID_ID.fullmatch(instance_id) or os.environ.get("NOIR_VPS_ID") != instance_id:
+        raise SystemExit(1)
+    _ensure_sshd()
+    pid = _read_int(PID_FILE)
+    if pid > 1 and _alive(pid, b"noir-pinggy"):
+        return
+    _spawn_pinggy_pty("-R0:127.0.0.1:22", "tcp", OUT_FILE, PID_FILE)
+
+
+def read_ssh_info() -> None:
+    pid = _read_int(PID_FILE)
+    if pid <= 1 or not os.path.exists(OUT_FILE) or not os.path.exists(PASS_FILE):
+        raise SystemExit(1)
+    raw = ANSI_RE.sub("", open(OUT_FILE, errors="replace").read(16384))
+    match = TCP_URL_RE.search(raw)
+    if not match:
+        raise SystemExit(1)
+    host, port = match.group(1), match.group(2)
+    password = open(PASS_FILE).read().strip()
+    sys.stdout.write(f"{host}\n{port}\n{password}\n")
+
+
+def start_http(instance_id: str, port_raw: str) -> None:
+    if not VALID_ID.fullmatch(instance_id) or os.environ.get("NOIR_VPS_ID") != instance_id:
+        raise SystemExit(1)
+    port = int(port_raw)
+    if not 1 <= port <= 65535:
+        raise SystemExit(1)
+    pid_path = f"{HTTP_PID_PREFIX}{port}.pid"
+    out_path = f"{HTTP_OUT_PREFIX}{port}.out"
+    pid = _read_int(pid_path)
+    if pid > 1 and _alive(pid, b"noir-pinggy"):
+        return
+    _spawn_pinggy_pty(f"-R0:127.0.0.1:{port}", "a", out_path, pid_path)
+
+
+def read_http_url(port_raw: str) -> None:
+    port = int(port_raw)
+    out_path = f"{HTTP_OUT_PREFIX}{port}.out"
+    if not os.path.exists(out_path):
+        raise SystemExit(1)
+    raw = ANSI_RE.sub("", open(out_path, errors="replace").read(16384))
+    match = HTTPS_URL_RE.search(raw)
+    if not match:
+        raise SystemExit(1)
+    sys.stdout.write(match.group(0))
+
+
+def main() -> None:
+    os.umask(0o077)
+    os.makedirs(DIR, mode=0o700, exist_ok=True)
+    with open(DIR + "/lock", "a", opener=lambda p, f: os.open(p, f, 0o600)) as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        action = sys.argv[1] if len(sys.argv) > 1 else ""
+        if action == "start" and len(sys.argv) == 3:
+            start_ssh(sys.argv[2])
+        elif action == "info":
+            read_ssh_info()
+        elif action == "stop":
+            _kill_daemon(PID_FILE, OUT_FILE)
+        elif action == "http-start" and len(sys.argv) == 4:
+            start_http(sys.argv[2], sys.argv[3])
+        elif action == "http-url" and len(sys.argv) == 3:
+            read_http_url(sys.argv[2])
+        elif action == "http-stop" and len(sys.argv) == 3:
+            port = int(sys.argv[2])
+            _kill_daemon(f"{HTTP_PID_PREFIX}{port}.pid", f"{HTTP_OUT_PREFIX}{port}.out")
+        else:
+            raise SystemExit(2)
+
+
+if __name__ == "__main__":
+    main()

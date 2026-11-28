@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from noir.models import LiveStats, Specs
+from noir.models import LiveStats, PinggySSHSession, Specs
 from noir.os_catalog import DEFAULT_OS
 
 
@@ -123,6 +123,37 @@ class FakeBackend:
 
     def close_sshx(self, instance_id: str) -> None:
         self.events.append("close-sshx:" + instance_id)
+
+    def pinggy_ssh(self, instance_id: str) -> PinggySSHSession:
+        if self.items.get(instance_id, {}).get("status") != "running":
+            from noir.errors import UserError
+
+            raise UserError("Start the VPS before opening SSH.")
+        self.events.append("pinggy-ssh:" + instance_id)
+        return PinggySSHSession(
+            host="test-node.a.free.pinggy.link",
+            port=40527,
+            password="TestPass123456",
+        )
+
+    def close_pinggy_ssh(self, instance_id: str) -> None:
+        self.events.append("close-pinggy-ssh:" + instance_id)
+
+    def pinggy_http(self, instance_id: str, port: int) -> str:
+        if self.items.get(instance_id, {}).get("status") != "running":
+            from noir.errors import UserError
+
+            raise UserError("Start the VPS before opening a tunnel.")
+        self.events.append(f"pinggy-http:{instance_id}:{port}")
+        return f"https://noir-{port}.a.free.pinggy.link"
+
+    def close_pinggy_http(self, instance_id: str, port: int) -> None:
+        self.events.append(f"close-pinggy-http:{instance_id}:{port}")
+
+    def set_network_lock(self, instance_id: str, locked: bool) -> None:
+        if instance_id in self.items:
+            self.items[instance_id]["net_locked"] = locked
+        self.events.append(f"netlock:{instance_id}:{int(locked)}")
 
     def exec_command(self, instance_id: str, shell_cmd: str) -> tuple[int, str]:
         if self.items.get(instance_id, {}).get("status") != "running":

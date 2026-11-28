@@ -7,7 +7,16 @@ from pathlib import Path
 import discord
 
 from .errors import NoirError, UserError
-from .models import Actor, HostStatus, Instance, LiveStats, PortMapping, RedeemCode, Specs
+from .models import (
+    Actor,
+    HostStatus,
+    Instance,
+    LiveStats,
+    PinggySSHSession,
+    PortMapping,
+    RedeemCode,
+    Specs,
+)
 from .os_catalog import DEFAULT_OS, OS_CHOICES, os_choice, os_label
 from .templates import TEMPLATES
 
@@ -154,7 +163,10 @@ def instance_embed(
             f"contact an admin to unsuspend"
         )
     elif instance.status == "running":
-        access_line = "**Root terminal** — click **Console** to open a private SSHX root shell"
+        access_line = (
+            "**Root terminal** — click **Console** to choose **SSH (Pinggy)** "
+            "or **SSHX (Web Terminal)**"
+        )
     elif instance.status == "stopped":
         access_line = "**Stopped** — click **Start** to boot this VPS (files are preserved)"
     else:
@@ -165,6 +177,10 @@ def instance_embed(
         meta_parts.append(f"**Expires** {_discord_time(instance.expires_at, 'R')}")
     if instance.backup_at:
         meta_parts.append(f"**Backup** {_discord_time(instance.backup_at, 'R')}")
+    if instance.autobackup:
+        meta_parts.append("**AutoBackup** `ON`")
+    if instance.net_locked:
+        meta_parts.append("**NetLock** `ON`")
     meta_line = " • ".join(meta_parts)
 
     description = (
@@ -231,20 +247,21 @@ def help_embed(settings) -> discord.Embed:
             "`noir-cli-guide`\n"
             "> **Status** Online · Server & DM Control Enabled\n\n"
             "> **Owner / DM** `!manage [id]` • `!rename <id> <name>` • `!port <id>` • "
-            "`!redeem <code>`\n"
+            "`!tunnel <id> <port>` • `!redeem <code>`\n"
+            "> **Team & Git** `!share <id> @user` • `!unshare <id> @user` • "
+            "`!gitdeploy <id> <github_url>` • `!autobackup <id> <on|off>`\n"
             "> **Dev & Snapshots** `!exec <id> <cmd>` • `!logs <id>` • `!template <id> [name]` • "
             "`!sshkey <pubkey|clear>` • `!backup <id>` • `!restore <id>` • `!transfer <id> @user`\n"
             "> **Admin Deploy** `!deploy RAM CPU DISK [@user] [30d]` • "
             "`!gencode RAM CPU DISK [30d] [uses]` • `!codes`\n"
             "> **Admin Fleet** `!status` • `!list [@user]` • `!suspend <id> [reason]` • "
-            "`!unsuspend <id>`\n"
-            "> **Admin Plans** `!resize <id> R C D` • `!renew <id> <30d|never>` • `!delete @user`\n"
-            "> **Slash Commands** `/manage` • `/redeem` • `/panel` • `/status` • "
-            "`/list` • `/deploy` • `/gencode` • `/suspend`\n\n"
+            "`!unsuspend <id>` • `!netlock <id> <on|off>`\n"
+            "> **Admin Ops** `!resize <id> R C D` • `!renew <id> <30d|never>` • "
+            "`!maintenance <on|off> [reason]` • `!announce <msg>` • `!delete @user`\n\n"
             f"> **Per-User Limit** {settings.max_per_user} VPS • **Max Plan** "
             f"{settings.max_ram_gb}GB RAM / {settings.max_cpu} CPU / "
             f"{settings.max_disk_gb}GB Disk\n"
-            "> **Tip** Send `!manage` or `!redeem` directly to NOIR in **DMs** anytime."
+            "> **Console** Click **Console** on `!manage` to pick **SSH (Pinggy.io)** or **SSHX**."
         ),
         color=COLOR,
     )
@@ -483,6 +500,86 @@ def templates_embed(instance: Instance) -> discord.Embed:
         color=ACCENT,
     )
     return _brand(embed, "NOIR Cloud • 1-Click App Starters")
+
+
+def console_choice_embed(instance: Instance) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    cores_word = "Core" if instance.cpu == 1 else "Cores"
+    embed = discord.Embed(
+        title=f"Root Console — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** Choose Root Connection Method\n\n"
+            f"> **User** `root` • **OS** {instance.os} • **Config** "
+            f"{instance.ram_gb}GB RAM / {instance.cpu} {cores_word} / {instance.disk_gb}GB Disk\n"
+            f"> **SSH (Pinggy.io)** Direct `ssh -p <port> root@<host>` "
+            f"(Terminal, VS Code, PuTTY, SFTP)\n"
+            f"> **SSHX (Web Shell)** Instant private browser root terminal (`sshx.io`)\n\n"
+            f"> Click **SSH** or **SSHX** below to launch your private root session."
+        ),
+        color=ACCENT,
+    )
+    return _brand(embed, "NOIR Cloud • Root Access Selector")
+
+
+def pinggy_ssh_embed(
+    instance: Instance, session: PinggySSHSession, *, closed: bool = False
+) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    if closed:
+        status_line = "Closed · Tunnel Terminated"
+        body = (
+            f"> **Host** `{session.host}` • **Port** `{session.port}`\n\n"
+            f"> **Session closed** — click **Console** → **SSH** on the panel "
+            f"to open a new tunnel"
+        )
+        color = MUTED
+    else:
+        status_line = "Active · Pinggy.io TCP Tunnel"
+        body = (
+            f"> **Command** `{session.command}`\n"
+            f"> **Host** `{session.host}` • **Port** `{session.port}` • **User** `root`\n"
+            f"> **Password** ||`{session.password}`|| *(or use your saved `!sshkey`)*\n\n"
+            f"> **Private root credentials** — works in Terminal, PuTTY, SFTP & VS Code Remote-SSH"
+        )
+        color = SUCCESS
+    embed = discord.Embed(
+        title=f"Root SSH (Pinggy.io) — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** {status_line}\n\n"
+            f"{body}"
+        ),
+        color=color,
+    )
+    return _brand(embed, "NOIR Cloud • Pinggy.io Root SSH")
+
+
+def https_tunnel_embed(
+    instance: Instance, port: int, url: str, *, closed: bool = False
+) -> discord.Embed:
+    vmid = _vmid_short(instance.id)
+    if closed:
+        status_line = "Closed · HTTPS Tunnel Stopped"
+        detail = "> **Tunnel closed** — click **Tunnel** or run `!tunnel` to open a new HTTPS URL"
+        color = MUTED
+    else:
+        status_line = f"Live · Forwarding `127.0.0.1:{port}`"
+        detail = (
+            f"> **Public HTTPS URL** `{url}`\n"
+            f"> **Target** `container:{port}` *(bind your app to `0.0.0.0:{port}`)*"
+        )
+        color = SUCCESS
+    embed = discord.Embed(
+        title=f"HTTPS Tunnel (Pinggy.io) — VMID `{vmid}`",
+        description=(
+            f"`{instance.id}-{instance.owner_id}`\n"
+            f"> **Status** {status_line}\n\n"
+            f"{detail}"
+        ),
+        color=color,
+    )
+    return _brand(embed, "NOIR Cloud • Pinggy.io HTTPS Tunnel")
 
 
 def sshx_embed(instance: Instance, *, closed: bool = False) -> discord.Embed:
@@ -1240,20 +1337,28 @@ class ManageView(discord.ui.View):
     def _sync_button_states(self) -> None:
         inst = self.current()
         suspended = bool(inst and inst.is_suspended)
+        is_owner_or_admin = bool(
+            inst and (self.actor.is_admin or self.actor.user_id == inst.owner_id)
+        )
         for btn in (
             self.start,
             self.stop,
             self.restart,
             self.sshx,
-            self.reinstall,
             self.ports,
+            self.tunnel_btn,
             self.logs_btn,
             self.templates_btn,
         ):
             btn.disabled = suspended
+        self.reinstall.disabled = suspended or not is_owner_or_admin
+        self.delete.disabled = not is_owner_or_admin
+        self.rename_btn.disabled = not is_owner_or_admin
         self.backup.disabled = suspended and not self.actor.is_admin
-        self.restore.disabled = (suspended and not self.actor.is_admin) or not bool(
-            inst and inst.backup_at
+        self.restore.disabled = (
+            (suspended and not self.actor.is_admin)
+            or not is_owner_or_admin
+            or not bool(inst and inst.backup_at)
         )
 
     def current(self) -> Instance | None:
@@ -1355,26 +1460,18 @@ class ManageView(discord.ui.View):
 
     @discord.ui.button(label="Console", style=discord.ButtonStyle.primary, row=1)
     async def sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True, thinking=True)
         try:
-            instance, url = await self.manager.sshx(self.actor, self.selected)
-            view = SSHXView(self.manager, self.actor, instance.id, url, instance=instance)
-            view.message = await interaction.followup.send(
-                embed=sshx_embed(instance),
-                view=view,
-                ephemeral=True,
-                wait=True,
-            )
-            if hasattr(self.bot, "audit_log"):
-                await self.bot.audit_log(
-                    "Root Console Opened",
-                    actor_id=self.actor.user_id,
-                    instance=instance,
-                    color=ACCENT,
-                )
+            instance = await self.manager.get(self.actor, self.selected)
         except Exception as exc:
-            log.exception("SSHX failed")
-            await interaction.followup.send(error_text(exc), ephemeral=True)
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = ConsoleChoiceView(self.bot, self.actor, instance)
+        await interaction.response.send_message(
+            embed=console_choice_embed(instance),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
 
     @discord.ui.button(label="Stats", style=discord.ButtonStyle.secondary, row=1)
     async def stats(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1432,7 +1529,7 @@ class ManageView(discord.ui.View):
     @discord.ui.button(label="Restore", style=discord.ButtonStyle.secondary, row=2)
     async def restore(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            instance = await self.manager.get(self.actor, self.selected)
+            instance = await self.manager.get(self.actor, self.selected, owner_only=True)
             if not instance.backup_at:
                 raise UserError("No backup snapshot exists yet. Click **Backup** first.")
         except Exception as exc:
@@ -1449,7 +1546,7 @@ class ManageView(discord.ui.View):
     @discord.ui.button(label="Reinstall", style=discord.ButtonStyle.danger, row=2)
     async def reinstall(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            instance = await self.manager.get(self.actor, self.selected)
+            instance = await self.manager.get(self.actor, self.selected, owner_only=True)
         except Exception as exc:
             await interaction.response.send_message(error_text(exc), ephemeral=True)
             return
@@ -1549,7 +1646,7 @@ class ManageView(discord.ui.View):
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, row=2)
     async def delete(self, interaction: discord.Interaction, button: discord.ui.Button):
         try:
-            instance = await self.manager.get(self.actor, self.selected)
+            instance = await self.manager.get(self.actor, self.selected, owner_only=True)
         except Exception as exc:
             await interaction.response.send_message(error_text(exc), ephemeral=True)
             return
@@ -1560,6 +1657,14 @@ class ManageView(discord.ui.View):
             ephemeral=True,
         )
         view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Tunnel", style=discord.ButtonStyle.secondary, row=4)
+    async def tunnel_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        inst = self.current()
+        if inst is None:
+            await interaction.response.send_message("No VPS selected.", ephemeral=True)
+            return
+        await interaction.response.send_modal(TunnelPortModal(self.bot, self.actor, inst))
 
     @discord.ui.button(label="Open in DM", style=discord.ButtonStyle.secondary, row=4)
     async def send_dm(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1647,6 +1752,223 @@ class HostStatusView(discord.ui.View):
                 await self.message.edit(view=self)
             except discord.HTTPException:
                 pass
+
+
+class ConsoleChoiceView(discord.ui.View):
+    """2-option Root Console selector: SSH (Pinggy.io TCP) or SSHX (Browser Shell)."""
+
+    def __init__(self, bot, actor: Actor, instance: Instance):
+        super().__init__(timeout=180)
+        self.bot = bot
+        self.actor = actor
+        self.instance = instance
+        self.message: discord.Message | discord.WebhookMessage | None = None
+
+    @property
+    def manager(self):
+        return self.bot.manager
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.actor.user_id:
+            await interaction.response.send_message(
+                "This private console selector is not yours.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="SSH", style=discord.ButtonStyle.primary)
+    async def open_ssh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            instance, session = await self.manager.pinggy_ssh(self.actor, self.instance.id)
+            self.stop()
+            ssh_view = PinggySSHView(self.manager, self.actor, instance, session)
+            await interaction.edit_original_response(
+                embed=pinggy_ssh_embed(instance, session),
+                view=ssh_view,
+            )
+            ssh_view.message = self.message or interaction.message
+            if hasattr(self.bot, "audit_log"):
+                await self.bot.audit_log(
+                    "Root SSH Tunnel Opened (Pinggy)",
+                    actor_id=self.actor.user_id,
+                    instance=instance,
+                    detail=f"`{session.host}:{session.port}`",
+                    color=ACCENT,
+                )
+        except Exception as exc:
+            log.exception("Pinggy SSH failed")
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+    @discord.ui.button(label="SSHX", style=discord.ButtonStyle.secondary)
+    async def open_sshx(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            instance, url = await self.manager.sshx(self.actor, self.instance.id)
+            self.stop()
+            sshx_view = SSHXView(self.manager, self.actor, instance.id, url, instance=instance)
+            await interaction.edit_original_response(
+                embed=sshx_embed(instance),
+                view=sshx_view,
+            )
+            sshx_view.message = self.message or interaction.message  # type: ignore[assignment]
+            if hasattr(self.bot, "audit_log"):
+                await self.bot.audit_log(
+                    "Root Console Opened (SSHX)",
+                    actor_id=self.actor.user_id,
+                    instance=instance,
+                    color=ACCENT,
+                )
+        except Exception as exc:
+            log.exception("SSHX failed")
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class PinggySSHView(discord.ui.View):
+    def __init__(
+        self,
+        manager,
+        actor: Actor,
+        instance: Instance,
+        session: PinggySSHSession,
+    ):
+        super().__init__(timeout=600)
+        self.manager = manager
+        self.actor = actor
+        self.instance = instance
+        self.session = session
+        self.message: discord.Message | discord.WebhookMessage | None = None
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.actor.user_id:
+            await interaction.response.send_message(
+                "This private SSH panel is not yours.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Close SSH", style=discord.ButtonStyle.danger)
+    async def close_ssh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            await self.manager.close_pinggy_ssh(self.actor, self.instance.id)
+            self.stop()
+            for child in self.children:
+                child.disabled = True  # type: ignore[attr-defined]
+            await interaction.edit_original_response(
+                embed=pinggy_ssh_embed(self.instance, self.session, closed=True),
+                view=self,
+            )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class HTTPSTunnelView(discord.ui.View):
+    def __init__(self, manager, actor: Actor, instance: Instance, port: int, url: str):
+        super().__init__(timeout=600)
+        self.manager = manager
+        self.actor = actor
+        self.instance = instance
+        self.port = port
+        self.url = url
+        self.message: discord.Message | discord.WebhookMessage | None = None
+        self.add_item(discord.ui.Button(label="Open HTTPS URL", url=url))
+
+    async def on_timeout(self) -> None:
+        for child in self.children:
+            child.disabled = True  # type: ignore[attr-defined]
+        if self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.actor.user_id:
+            await interaction.response.send_message(
+                "This tunnel panel is not yours.", ephemeral=True
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="Close Tunnel", style=discord.ButtonStyle.danger)
+    async def close_tunnel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        try:
+            await self.manager.close_pinggy_http(self.actor, self.instance.id, self.port)
+            self.stop()
+            for child in self.children:
+                child.disabled = True  # type: ignore[attr-defined]
+            await interaction.edit_original_response(
+                embed=https_tunnel_embed(self.instance, self.port, self.url, closed=True),
+                view=self,
+            )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
+
+
+class TunnelPortModal(discord.ui.Modal, title="Expose Public HTTPS URL (Pinggy.io)"):
+    container_port = discord.ui.TextInput(
+        label="Container HTTP Port (1–65535)",
+        placeholder="e.g. 3000, 5000, 8000, 8080",
+        required=True,
+        max_length=5,
+    )
+
+    def __init__(self, bot, actor: Actor, instance: Instance):
+        super().__init__()
+        self.bot = bot
+        self.actor = actor
+        self.instance = instance
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        raw = str(self.container_port.value or "").strip()
+        if not raw.isdigit():
+            await interaction.followup.send(
+                "Enter a whole HTTP port number such as `3000` or `8000`.", ephemeral=True
+            )
+            return
+        port = int(raw)
+        try:
+            inst, url = await self.bot.manager.pinggy_http(
+                self.actor, self.instance.id, port
+            )
+            view = HTTPSTunnelView(self.bot.manager, self.actor, inst, port, url)
+            view.message = await interaction.followup.send(
+                embed=https_tunnel_embed(inst, port, url),
+                view=view,
+                ephemeral=True,
+                wait=True,
+            )
+            if hasattr(self.bot, "audit_log"):
+                await self.bot.audit_log(
+                    "HTTPS Tunnel Opened (Pinggy)",
+                    actor_id=self.actor.user_id,
+                    instance=inst,
+                    detail=f"Port `{port}` → `{url}`",
+                    color=ACCENT,
+                )
+        except Exception as exc:
+            await interaction.followup.send(error_text(exc), ephemeral=True)
 
 
 class SSHXView(discord.ui.View):

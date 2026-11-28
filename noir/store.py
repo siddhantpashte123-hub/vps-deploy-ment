@@ -21,7 +21,7 @@ from .os_catalog import valid_os
 COLUMNS = (
     "id, guild_id, owner_id, ram_gb, cpu, disk_gb, container_id, status, "
     "created_at, updated_at, os, expires_at, suspended_reason, backup_at, "
-    "name, warned_24h, warned_1h"
+    "name, warned_24h, warned_1h, autobackup, net_locked"
 )
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
@@ -61,7 +61,9 @@ class Store:
                     backup_at TEXT,
                     name TEXT,
                     warned_24h INTEGER NOT NULL DEFAULT 0,
-                    warned_1h INTEGER NOT NULL DEFAULT 0
+                    warned_1h INTEGER NOT NULL DEFAULT 0,
+                    autobackup INTEGER NOT NULL DEFAULT 0,
+                    net_locked INTEGER NOT NULL DEFAULT 0
                 )"""
             )
             columns = {row[1] for row in self._db.execute("PRAGMA table_info(instances)")}
@@ -84,6 +86,14 @@ class Store:
             if "warned_1h" not in columns:
                 self._db.execute(
                     "ALTER TABLE instances ADD COLUMN warned_1h INTEGER NOT NULL DEFAULT 0"
+                )
+            if "autobackup" not in columns:
+                self._db.execute(
+                    "ALTER TABLE instances ADD COLUMN autobackup INTEGER NOT NULL DEFAULT 0"
+                )
+            if "net_locked" not in columns:
+                self._db.execute(
+                    "ALTER TABLE instances ADD COLUMN net_locked INTEGER NOT NULL DEFAULT 0"
                 )
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS instances_owner ON instances(guild_id, owner_id)"
@@ -130,6 +140,23 @@ class Store:
                     updated_at TEXT NOT NULL
                 )"""
             )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS subusers (
+                    instance_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    added_at TEXT NOT NULL,
+                    PRIMARY KEY (instance_id, user_id)
+                )"""
+            )
+            self._db.execute(
+                "CREATE INDEX IF NOT EXISTS subusers_user ON subusers(user_id)"
+            )
+            self._db.execute(
+                """CREATE TABLE IF NOT EXISTS host_settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )"""
+            )
 
     def close(self) -> None:
         with self._lock:
@@ -145,7 +172,7 @@ class Store:
         with self._lock, self._db:
             self._db.execute(
                 f"INSERT INTO instances ({COLUMNS}) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     instance.id,
                     str(instance.guild_id),
@@ -164,6 +191,8 @@ class Store:
                     instance.name,
                     int(instance.warned_24h),
                     int(instance.warned_1h),
+                    int(instance.autobackup),
+                    int(instance.net_locked),
                 ),
             )
         return instance
@@ -207,6 +236,8 @@ class Store:
             "name",
             "warned_24h",
             "warned_1h",
+            "autobackup",
+            "net_locked",
         }
         if not fields or not set(fields) <= allowed:
             raise ValueError("Unsupported inventory update")
@@ -230,6 +261,7 @@ class Store:
     def delete(self, instance_id: str) -> None:
         with self._lock, self._db:
             self._db.execute("DELETE FROM port_mappings WHERE instance_id = ?", (instance_id,))
+            self._db.execute("DELETE FROM subusers WHERE instance_id = ?", (instance_id,))
             self._db.execute("DELETE FROM instances WHERE id = ?", (instance_id,))
 
     def totals(self) -> tuple[int, int, int]:
@@ -433,3 +465,71 @@ class Store:
         with self._lock, self._db:
             cur = self._db.execute("DELETE FROM ssh_keys WHERE user_id = ?", (str(user_id),))
         return cur.rowcount > 0
+
+    # ---- Sub-users / Shared Access ----
+    def add_subuser(self, instance_id: str, user_id: int, *, max_subusers: int = 5) -> None:
+        with self._lock, self._db:
+            existing = self.list_subusers(instance_id)
+            if user_id in existing:
+                return
+            if len(existing) >= max_subusers:
+                raise UserError(f"Maximum of {max_subusers} shared sub-users reached.")
+            self._db.execute(
+                "INSERT INTO subusers (instance_id, user_id, added_at) VALUES (?, ?, ?)",
+                (instance_id, str(user_id), utc_now()),
+            )
+
+    def remove_subuser(self, instance_id: str, user_id: int) -> bool:
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "DELETE FROM subusers WHERE instance_id = ? AND user_id = ?",
+                (instance_id, str(user_id)),
+            )
+        return cur.rowcount > 0
+
+    def list_subusers(self, instance_id: str) -> list[int]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT user_id FROM subusers WHERE instance_id = ? ORDER BY added_at",
+                (instance_id,),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
+    def is_subuser(self, instance_id: str, user_id: int) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM subusers WHERE instance_id = ? AND user_id = ?",
+                (instance_id, str(user_id)),
+            ).fetchone()
+        return row is not None
+
+    def list_shared_for_user(self, guild_id: int, user_id: int) -> list[Instance]:
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT {COLUMNS} FROM instances "
+                "WHERE guild_id = ? AND id IN "
+                "(SELECT instance_id FROM subusers WHERE user_id = ?) "
+                "ORDER BY created_at, id",
+                (str(guild_id), str(user_id)),
+            ).fetchall()
+        return [Instance.from_row(r) for r in rows]
+
+    # ---- Host Maintenance Mode ----
+    def set_maintenance(self, reason: str | None) -> None:
+        with self._lock, self._db:
+            if reason is None:
+                self._db.execute("DELETE FROM host_settings WHERE key = 'maintenance'")
+            else:
+                self._db.execute(
+                    "INSERT INTO host_settings (key, value) VALUES ('maintenance', ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (reason,),
+                )
+
+    def get_maintenance(self) -> str | None:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT value FROM host_settings WHERE key = 'maintenance'"
+            ).fetchone()
+        return str(row[0]) if row is not None else None
+
