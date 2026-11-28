@@ -20,6 +20,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 STATE_ROOT = "/var/lib/noir"
 DISKS = STATE_ROOT + "/disks"
@@ -248,11 +249,29 @@ def mount_existing(instance_id: str) -> None:
     print(mount)
 
 
+def unmount_cleanly(mount: str) -> None:
+    """Unmount a VPS loop mount reliably after Docker container teardown."""
+    for _ in range(8):
+        if not mounted(mount):
+            return
+        try:
+            run_mount("umount", mount)
+            return
+        except RuntimeError:
+            time.sleep(0.35)
+    if mounted(mount):
+        run_mount("umount", "-l", mount)
+        for _ in range(10):
+            if not mounted(mount):
+                return
+            time.sleep(0.2)
+
+
 def delete(instance_id: str) -> None:
     image, mount = paths(instance_id)
     if os.path.lexists(mount):
         if mounted(mount):
-            run_mount("umount", mount)
+            unmount_cleanly(mount)
         if os.path.islink(mount):
             fail("Refusing to delete symlinked home.")
         if os.path.isdir(mount):

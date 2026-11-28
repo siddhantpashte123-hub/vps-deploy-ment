@@ -257,8 +257,21 @@ class Manager:
         async with self._locks[instance_id]:
             instance = await self.get(actor, instance_id, owner_only=owner_only)
             if action == "delete":
+                prev_status = instance.status
                 await asyncio.to_thread(self.store.update, instance_id, status="deleting")
-                await asyncio.to_thread(self.backend.remove_all, instance_id)
+                try:
+                    await asyncio.to_thread(self.backend.remove_all, instance_id)
+                except Exception:
+                    restore_state = (
+                        prev_status if prev_status != "deleting" else "error"
+                    )
+                    try:
+                        await asyncio.to_thread(
+                            self.store.update, instance_id, status=restore_state
+                        )
+                    except Exception:
+                        pass
+                    raise
                 await asyncio.to_thread(self.store.delete, instance_id)
                 return instance
             if instance.is_suspended and not actor.is_admin:

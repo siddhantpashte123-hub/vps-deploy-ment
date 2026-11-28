@@ -426,3 +426,13 @@ async def test_pinggy_ssh_subusers_autobackup_sweep_and_gitdeploy_validation(
     with pytest.raises(UserError, match="HTTPS GitHub repository URL"):
         await manager.git_deploy(member_actor, inst.id, "http://evil.local/repo;rm -rf /")
 
+    # Failed delete rolls status back from 'deleting' so retry works cleanly
+    backend.fail_cleanup = True
+    with pytest.raises(RuntimeError):
+        await manager.delete(member_actor, inst.id)
+    assert store.get(inst.id).status == "running"
+    backend.fail_cleanup = False
+    await manager.delete(member_actor, inst.id)
+    assert store.list() == []
+
+
