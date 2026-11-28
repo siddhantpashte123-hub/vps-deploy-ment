@@ -824,12 +824,29 @@ def build_bot(settings: Settings, manager: Manager, backend) -> NoirBot:
     async def restore_command(ctx: commands.Context, instance_id: str):
         """Restore the latest /home/noir snapshot (opens confirmation)."""
         actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
-        instance = await manager.get(actor, instance_id)
+        instance = await manager.get(actor, instance_id, owner_only=True)
         if not instance.backup_at:
             raise UserError("No backup snapshot exists yet. Run `!backup <id>` first.")
         view = ConfirmView(manager, actor, instance, "restore", bot=bot)
         message = await ctx.send(
             embed=confirm_embed(instance, "restore"),
+            view=view,
+            reference=ctx.message,
+            mention_author=False,
+        )
+        view.message = message
+
+    @bot.command(name="delbackup", aliases=["rmbackup", "deletebackup"], ignore_extra=False)
+    @commands.cooldown(2, 10, commands.BucketType.user)
+    async def delbackup_command(ctx: commands.Context, instance_id: str):
+        """Delete the saved /home/noir backup archive for a VPS (opens confirmation)."""
+        actor = await bot.resolve_actor(ctx.author, ctx.guild.id if ctx.guild else None)
+        instance = await manager.get(actor, instance_id, owner_only=True)
+        if not instance.backup_at:
+            raise UserError("No saved backup snapshot exists for this VPS.")
+        view = ConfirmView(manager, actor, instance, "delete_backup", bot=bot)
+        message = await ctx.send(
+            embed=confirm_embed(instance, "delete_backup"),
             view=view,
             reference=ctx.message,
             mention_author=False,
@@ -1735,5 +1752,25 @@ def _register_slash_commands(bot: NoirBot, settings: Settings, manager: Manager)
                 ),
                 ephemeral=True,
             )
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+
+    @bot.tree.command(
+        name="delbackup", description="Delete the saved /home/noir backup snapshot for your VPS"
+    )
+    @app_commands.describe(instance_id="VPS ID (e.g. noir-a1b2c3d4e5f6)")
+    async def slash_delbackup(interaction: discord.Interaction, instance_id: str):
+        try:
+            actor = await bot.resolve_actor(interaction.user, interaction.guild_id)
+            instance = await manager.get(actor, instance_id, owner_only=True)
+            if not instance.backup_at:
+                raise UserError("No saved backup snapshot exists for this VPS.")
+            view = ConfirmView(manager, actor, instance, "delete_backup", bot=bot)
+            await interaction.response.send_message(
+                embed=confirm_embed(instance, "delete_backup"),
+                view=view,
+                ephemeral=True,
+            )
+            view.message = await interaction.original_response()
         except Exception as exc:
             await interaction.response.send_message(error_text(exc), ephemeral=True)

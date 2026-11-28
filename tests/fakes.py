@@ -109,6 +109,11 @@ class FakeBackend:
             raise BackendError("Disk helper: No saved backup exists for this VPS yet.")
         self.events.append("restore:" + instance_id)
 
+    def delete_backup(self, instance_id: str) -> None:
+        if instance_id in self.items:
+            self.items[instance_id]["backed_up"] = False
+        self.events.append("delete-backup:" + instance_id)
+
     def remove_all(self, instance_id: str) -> None:
         self.events.append("remove:" + instance_id)
         if self.fail_cleanup:

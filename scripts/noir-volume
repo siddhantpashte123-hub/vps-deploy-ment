@@ -350,6 +350,18 @@ def restore(instance_id: str) -> None:
     print("ok")
 
 
+def delete_backup(instance_id: str) -> None:
+    paths(instance_id)  # validate instance_id
+    safe_dir(BACKUPS, create=True)
+    archive = BACKUPS + "/" + instance_id + ".tar.gz"
+    if os.path.lexists(archive):
+        st = os.lstat(archive)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != 0:
+            fail("Refusing to delete an unsafe backup archive.")
+        os.unlink(archive)
+    print("ok")
+
+
 def main() -> None:
     os.umask(0o077)
     args = sys.argv[1:]
@@ -358,11 +370,21 @@ def main() -> None:
         return
     if os.geteuid() != 0:
         fail("Helper must run as root.")
-    valid_cmds = {"create", "mount", "delete", "resize", "backup", "restore", "info", "probe"}
+    valid_cmds = {
+        "create",
+        "mount",
+        "delete",
+        "resize",
+        "backup",
+        "restore",
+        "delete-backup",
+        "info",
+        "probe",
+    }
     if len(args) not in (2, 3) or args[0] not in valid_cmds:
         fail(
             "Usage: noir-volume create|resize ID GB | "
-            "mount|delete|backup|restore|info|probe|check ID"
+            "mount|delete|backup|restore|delete-backup|info|probe|check ID"
         )
     try:
         if args[0] == "create":
@@ -381,6 +403,8 @@ def main() -> None:
             backup(args[1])
         elif args[0] == "restore":
             restore(args[1])
+        elif args[0] == "delete-backup":
+            delete_backup(args[1])
         elif args[0] == "probe":
             print("loop" if probe_loop() else "directory")
         else:

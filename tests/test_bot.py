@@ -736,13 +736,32 @@ async def test_user_backup_restore_restart_transfer_and_audit_channel(
     press = make_interaction(owner, actor.guild_id)
     await confirm.confirm.callback(press)
 
-    # Restart button on ManageView
+    # Restart & Del Backup buttons on ManageView
     panel = ManageView(
         audited_bot, Actor(TARGET_ID, actor.guild_id, False), [manager.store.get(inst.id)]
     )
     assert all(getattr(c, "emoji", None) is None for c in panel.children)
+    assert panel.delete_backup_btn.disabled is False
     restart_press = make_interaction(owner, actor.guild_id)
     await panel.restart.callback(restart_press)
+
+    del_bkp_press = make_interaction(owner, actor.guild_id)
+    await panel.delete_backup_btn.callback(del_bkp_press)
+    del_confirm = del_bkp_press.response.send_message.call_args.kwargs["view"]
+    assert isinstance(del_confirm, ConfirmView)
+    confirm_press = make_interaction(owner, actor.guild_id)
+    await del_confirm.confirm.callback(confirm_press)
+    assert manager.store.get(inst.id).backup_at is None
+    assert panel.delete_backup_btn.disabled is True
+    assert panel.restore.disabled is True
+
+    # !delbackup command flow when a backup exists
+    await invoke(audited_bot, guild, owner, "backup", inst.id)
+    assert manager.store.get(inst.id).backup_at is not None
+    delcmd_ctx = await invoke(audited_bot, guild, owner, "delbackup", inst.id)
+    delcmd_view = delcmd_ctx.send.call_args.kwargs["view"]
+    await delcmd_view.confirm.callback(make_interaction(owner, actor.guild_id))
+    assert manager.store.get(inst.id).backup_at is None
 
     # Owner transfers VPS to another member
     new_owner_id = 333444555666777888

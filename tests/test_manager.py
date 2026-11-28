@@ -415,6 +415,13 @@ async def test_pinggy_ssh_subusers_autobackup_sweep_and_gitdeploy_validation(
     assert [i.id for i in saved] == [inst.id]
     assert await manager.sweep_autobackups() == []
 
+    # Delete backup clears backup_at and rejects sub-users
+    with pytest.raises(AccessDenied):
+        await manager.delete_backup(sub_actor, inst.id)
+    cleared_bkp = await manager.delete_backup(member_actor, inst.id)
+    assert cleared_bkp.backup_at is None
+    assert f"delete-backup:{inst.id}" in backend.events
+
     # Git deploy rejects non-GitHub / shell-injection URLs
     with pytest.raises(UserError, match="HTTPS GitHub repository URL"):
         await manager.git_deploy(member_actor, inst.id, "http://evil.local/repo;rm -rf /")

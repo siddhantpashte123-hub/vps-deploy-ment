@@ -22,6 +22,7 @@ Admin-created Ubuntu 24.04 / Ubuntu 22.04 / Debian 12 / Alpine 3.20 development 
 !tunnel <id> <port>             owner/sub-user: expose any container HTTP port as a public HTTPS URL (Pinggy.io)
 !share <id> @user / !unshare    owner or admin: grant/revoke teammate sub-user access
 !autobackup <id> <on|off>       owner or admin: automatic 24-hour /home/noir snapshots
+!delbackup <id>                 owner or admin: delete saved /home/noir .tar.gz backup snapshot
 !gitdeploy <id> <github_url>    owner or admin: clone/pull a GitHub repo & install dependencies
 !port add <id> <port>           owner or admin: forward a public host TCP port to your container
 !rename <id> <name>             owner or admin: set a custom nickname for your VPS
@@ -103,6 +104,7 @@ The management panel has:
 | **Stats** | Refresh live container uptime, CPU %, RAM MB, and `/home/noir` disk usage in-place. |
 | **Backup** | Save a compressed `.tar.gz` snapshot of `/home/noir` on the host. |
 | **Restore** | Confirm first, then restore `/home/noir` from your latest saved snapshot. |
+| **Del Backup** | Confirm first, then delete the saved `.tar.gz` snapshot without touching live `/home/noir` files. |
 | **Reinstall** | Choose the replacement OS (Ubuntu 24.04 / Ubuntu 22.04 / Debian 12), confirm, then **erase all files** and recreate a fresh root container with the same ID/resources/owner. |
 | **Refresh** | Reconcile the panel with Docker and live telemetry. |
 | **Delete** | Confirm first, then remove the container, its disk, and saved snapshot permanently. |

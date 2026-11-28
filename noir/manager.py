@@ -484,6 +484,17 @@ class Manager:
             )
             return await asyncio.to_thread(self.store.update, instance_id, status=status)
 
+    async def delete_backup(self, actor: Actor, instance_id: str) -> Instance:
+        async with self._locks[instance_id]:
+            instance = await self.get(actor, instance_id, owner_only=True)
+            if not instance.backup_at:
+                raise UserError("No saved backup snapshot exists for this VPS.")
+            fn = getattr(self.backend, "delete_backup", None)
+            if fn is None:
+                raise BackendError("Backup deletion is not supported by this backend.")
+            await asyncio.to_thread(fn, instance.id)
+            return await asyncio.to_thread(self.store.update, instance.id, backup_at=None)
+
     async def sweep_expired(self) -> list[Instance]:
         """Auto-suspend any non-suspended VPS whose expires_at timestamp has passed."""
         from datetime import datetime, timezone

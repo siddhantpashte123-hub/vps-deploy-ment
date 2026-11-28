@@ -251,7 +251,8 @@ def help_embed(settings) -> discord.Embed:
             "> **Team & Git** `!share <id> @user` • `!unshare <id> @user` • "
             "`!gitdeploy <id> <github_url>` • `!autobackup <id> <on|off>`\n"
             "> **Dev & Snapshots** `!exec <id> <cmd>` • `!logs <id>` • `!template <id> [name]` • "
-            "`!sshkey <pubkey|clear>` • `!backup <id>` • `!restore <id>` • `!transfer <id> @user`\n"
+            "`!sshkey <pubkey|clear>` • `!backup <id>` • `!restore <id>` • `!delbackup <id>` • "
+            "`!transfer <id> @user`\n"
             "> **Admin Deploy** `!deploy RAM CPU DISK [@user] [30d]` • "
             "`!gencode RAM CPU DISK [30d] [uses]` • `!codes`\n"
             "> **Admin Fleet** `!status` • `!list [@user]` • `!suspend <id> [reason]` • "
@@ -629,6 +630,13 @@ def confirm_embed(
         warning_line = (
             f"**Overwrite `/home/noir`** — current home files will be replaced by the "
             f"backup taken {snap}"
+        )
+    elif action == "delete_backup":
+        heading = f"Delete Backup Snapshot — VMID `{vmid}`"
+        target_os = instance.os
+        warning_line = (
+            "**Remove saved `.tar.gz` snapshot** — your live VPS & `/home/noir` files "
+            "stay untouched, only the archived backup file is deleted"
         )
     else:
         heading = f"Reinstall VPS — VMID `{vmid}`"
@@ -1044,6 +1052,7 @@ class ConfirmView(discord.ui.View):
         action: str,
         os_key: str | None = None,
         bot=None,
+        parent_view: ManageView | None = None,
     ):
         super().__init__(timeout=120)
         self.manager = manager
@@ -1052,12 +1061,15 @@ class ConfirmView(discord.ui.View):
         self.action = action
         self.os_key = os_key
         self.bot = bot
+        self.parent_view = parent_view
         self.handled = False
         self.message: discord.Message | None = None
         if action == "delete":
             self.confirm.label = "Delete permanently"
         elif action == "restore":
             self.confirm.label = "Restore snapshot"
+        elif action == "delete_backup":
+            self.confirm.label = "Delete backup"
         else:
             self.confirm.label = "Wipe & reinstall"
 
@@ -1124,6 +1136,28 @@ class ConfirmView(discord.ui.View):
                 if self.bot is not None and hasattr(self.bot, "audit_log"):
                     await self.bot.audit_log(
                         "Backup Restored",
+                        actor_id=self.actor.user_id,
+                        instance=instance,
+                        color=WARNING,
+                    )
+            elif self.action == "delete_backup":
+                instance = await self.manager.delete_backup(self.actor, self.instance.id)
+                self.instance = instance
+                text = "Saved backup snapshot deleted. Your live `/home/noir` files are untouched."
+                if self.parent_view is not None:
+                    self.parent_view._replace_instance(instance)
+                    self.parent_view._sync_button_states()
+                    live = await self.manager.stats(self.actor, instance.id)
+                    await self.parent_view._edit_panel(
+                        interaction,
+                        instance_embed(
+                            instance, live, index=self.parent_view.current_index()
+                        ),
+                        self.parent_view,
+                    )
+                if self.bot is not None and hasattr(self.bot, "audit_log"):
+                    await self.bot.audit_log(
+                        "Backup Snapshot Deleted",
                         actor_id=self.actor.user_id,
                         instance=instance,
                         color=WARNING,
@@ -1355,11 +1389,13 @@ class ManageView(discord.ui.View):
         self.delete.disabled = not is_owner_or_admin
         self.rename_btn.disabled = not is_owner_or_admin
         self.backup.disabled = suspended and not self.actor.is_admin
+        has_snap = bool(inst and inst.backup_at)
         self.restore.disabled = (
             (suspended and not self.actor.is_admin)
             or not is_owner_or_admin
-            or not bool(inst and inst.backup_at)
+            or not has_snap
         )
+        self.delete_backup_btn.disabled = not is_owner_or_admin or not has_snap
 
     def current(self) -> Instance | None:
         return next((i for i in self.instances if i.id == self.selected), None)
@@ -1535,9 +1571,37 @@ class ManageView(discord.ui.View):
         except Exception as exc:
             await interaction.response.send_message(error_text(exc), ephemeral=True)
             return
-        view = ConfirmView(self.manager, self.actor, instance, "restore", bot=self.bot)
+        view = ConfirmView(
+            self.manager, self.actor, instance, "restore", bot=self.bot, parent_view=self
+        )
         await interaction.response.send_message(
             embed=confirm_embed(instance, "restore"),
+            view=view,
+            ephemeral=True,
+        )
+        view.message = await interaction.original_response()
+
+    @discord.ui.button(label="Del Backup", style=discord.ButtonStyle.secondary, row=2)
+    async def delete_backup_btn(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        try:
+            instance = await self.manager.get(self.actor, self.selected, owner_only=True)
+            if not instance.backup_at:
+                raise UserError("No saved backup snapshot exists for this VPS.")
+        except Exception as exc:
+            await interaction.response.send_message(error_text(exc), ephemeral=True)
+            return
+        view = ConfirmView(
+            self.manager,
+            self.actor,
+            instance,
+            "delete_backup",
+            bot=self.bot,
+            parent_view=self,
+        )
+        await interaction.response.send_message(
+            embed=confirm_embed(instance, "delete_backup"),
             view=view,
             ephemeral=True,
         )
