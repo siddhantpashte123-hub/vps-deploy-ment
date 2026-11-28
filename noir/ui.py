@@ -1904,6 +1904,30 @@ class ConsoleChoiceView(discord.ui.View):
             return False
         return True
 
+    async def _deliver_view(
+        self,
+        interaction: discord.Interaction,
+        embed: discord.Embed,
+        new_view: discord.ui.View,
+    ) -> None:
+        try:
+            await interaction.edit_original_response(embed=embed, view=new_view)
+            new_view.message = self.message or interaction.message  # type: ignore[attr-defined]
+            return
+        except discord.HTTPException:
+            pass
+        if self.message is not None:
+            try:
+                await self.message.edit(embed=embed, view=new_view)
+                new_view.message = self.message  # type: ignore[attr-defined]
+                return
+            except discord.HTTPException:
+                pass
+        sent = await interaction.followup.send(
+            embed=embed, view=new_view, ephemeral=True, wait=True
+        )
+        new_view.message = sent  # type: ignore[attr-defined]
+
     @discord.ui.button(label="SSH", style=discord.ButtonStyle.primary)
     async def open_ssh(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
@@ -1913,11 +1937,7 @@ class ConsoleChoiceView(discord.ui.View):
             )
             self.stop()
             ssh_view = PinggySSHView(self.manager, self.actor, instance, session)
-            await interaction.edit_original_response(
-                embed=pinggy_ssh_embed(instance, session),
-                view=ssh_view,
-            )
-            ssh_view.message = self.message or interaction.message
+            await self._deliver_view(interaction, pinggy_ssh_embed(instance, session), ssh_view)
             if hasattr(self.bot, "audit_log"):
                 await self.bot.audit_log(
                     "Root SSH Tunnel Opened (Pinggy)",
@@ -1939,11 +1959,7 @@ class ConsoleChoiceView(discord.ui.View):
             )
             self.stop()
             sshx_view = SSHXView(self.manager, self.actor, instance.id, url, instance=instance)
-            await interaction.edit_original_response(
-                embed=sshx_embed(instance),
-                view=sshx_view,
-            )
-            sshx_view.message = self.message or interaction.message  # type: ignore[assignment]
+            await self._deliver_view(interaction, sshx_embed(instance), sshx_view)
             if hasattr(self.bot, "audit_log"):
                 await self.bot.audit_log(
                     "Root Console Opened (SSHX)",

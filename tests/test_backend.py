@@ -181,3 +181,83 @@ def test_backend_stats_parses_live_docker_telemetry(settings):
     assert abs(live.cpu_percent - 20.0) < 0.01
     assert live.ram_used_bytes == 256 * 1024**2
     assert live.disk_used_bytes == 512 * 1024**2
+
+
+def test_pinggy_and_sshx_helper_domain_and_url_extraction():
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+
+    def load_script(name: str):
+        path = str(root / "runtime" / name)
+        loader = importlib.machinery.SourceFileLoader(name.replace("-", "_"), path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        assert spec is not None
+        mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(mod)
+        return mod
+
+    pinggy = load_script("noir-pinggy")
+    # Current Pinggy free TCP & HTTPS domains (*.run.pinggy-free.link, *.free.pinggy.net, etc.)
+    for sample, expected_host, expected_port in [
+        (
+            "\x1b[2J\x1b[1;1Htcp://rndnj-103-170-183.run.pinggy-free.link:37779\r\n",
+            "rndnj-103-170-183.run.pinggy-free.link",
+            "37779",
+        ),
+        (
+            "tcp://abc-123.a.free.pinggy.link:41234",
+            "abc-123.a.free.pinggy.link",
+            "41234",
+        ),
+        (
+            "tcp://xyz.free.pinggy.net:29999",
+            "xyz.free.pinggy.net",
+            "29999",
+        ),
+    ]:
+        cleaned = pinggy._strip_ansi(sample)
+        m = pinggy.TCP_URL_RE.search(cleaned)
+        assert m is not None
+        assert (m.group(1), m.group(2)) == (expected_host, expected_port)
+
+    for https_sample, expected_url in [
+        (
+            "Tunnel ready: https://app-123.run.pinggy-free.link\r\n",
+            "https://app-123.run.pinggy-free.link",
+        ),
+        (
+            "https://demo.free.pinggy.net",
+            "https://demo.free.pinggy.net",
+        ),
+    ]:
+        m_http = pinggy.HTTPS_URL_RE.search(pinggy._strip_ansi(https_sample))
+        assert m_http is not None
+        assert m_http.group(0) == expected_url
+
+    sshx_mod = load_script("noir-sshx")
+    ansi_sshx = "  ➜  Link: \x1b[36mhttps://sshx.io/s/AbCdEf1234#Key_987654\x1b[0m\r\n"
+    m_sshx = sshx_mod.URL_SEARCH.search(sshx_mod._strip_ansi(ansi_sshx))
+    assert m_sshx is not None
+    assert m_sshx.group(0) == "https://sshx.io/s/AbCdEf1234#Key_987654"
+
+
+def test_sshx_auto_provisions_when_initial_start_fails(settings):
+    backend = DockerBackend(settings, Mock())
+    calls = [
+        (127, "noir-sshx missing"),
+        (0, "https://sshx.io/s/abc12345#secret99\n"),
+        (0, "https://sshx.io/s/abc12345#secret99\n"),
+    ]
+    with (
+        patch.object(backend, "_exec", side_effect=calls),
+        patch.object(backend, "_sync_runtime_script") as sync_mock,
+        patch.object(backend, "_ensure_sshx_binary") as bin_mock,
+    ):
+        url = backend.sshx("noir-a1b2c3d4e5f6")
+    assert url == "https://sshx.io/s/abc12345#secret99"
+    sync_mock.assert_called_once()
+    bin_mock.assert_called_once()
+

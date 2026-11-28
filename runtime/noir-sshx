@@ -13,11 +13,24 @@ URL = DIR + "/session.url"
 ERR = DIR + "/session.err"
 # Legacy fier- IDs from pre-NOIR installs remain valid for existing VPSes.
 VALID_ID = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
-VALID_URL = re.compile(r"https://sshx\.io/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+\n?")
+URL_SEARCH = re.compile(r"https://sshx\.io/s/[A-Za-z0-9_-]+#[A-Za-z0-9_-]+")
+ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text).replace("\x00", "")
 
 
 def alive(pid: int) -> bool:
+    if pid <= 1:
+        return False
     try:
+        os.kill(pid, 0)
+        with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
+            stat_txt = handle.read()
+        rparen = stat_txt.rfind(")")
+        if rparen != -1 and stat_txt[rparen + 2 : rparen + 3] == "Z":
+            return False
         with open(f"/proc/{pid}/cmdline", "rb") as handle:
             return b"sshx" in handle.read(4096)
     except OSError:
@@ -32,30 +45,59 @@ def read_pid() -> int:
         return 0
 
 
+def find_url() -> str | None:
+    for path in (URL, ERR):
+        if not os.path.exists(path):
+            continue
+        try:
+            raw = _strip_ansi(open(path, errors="replace").read(4096))
+        except OSError:
+            continue
+        match = URL_SEARCH.search(raw)
+        if match:
+            return match.group(0)
+    return None
+
+
 def start(instance_id: str) -> None:
     if not VALID_ID.fullmatch(instance_id) or os.environ.get("NOIR_VPS_ID") != instance_id:
+        sys.stderr.write("Invalid VPS environment for SSHX.\n")
         raise SystemExit(1)
+    if not os.path.exists("/usr/local/bin/sshx"):
+        sys.stderr.write("SSHX binary (/usr/local/bin/sshx) is missing inside the VPS.\n")
+        raise SystemExit(3)
     pid = read_pid()
-    if pid > 1 and alive(pid):
+    if pid > 1 and alive(pid) and find_url():
         return
+    if pid > 1 and alive(pid):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
     for path in (URL, ERR, PID):
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
+    shell = "/bin/bash" if os.path.exists("/bin/bash") else "/bin/sh"
+    home_dir = "/home/noir" if os.path.isdir("/home/noir") else "/root"
     with open(URL, "w", opener=lambda p, f: os.open(p, f, 0o600)) as out, open(
         ERR, "w", opener=lambda p, f: os.open(p, f, 0o600)
     ) as err:
         process = subprocess.Popen(
-            ["/usr/local/bin/sshx", "--quiet", "--shell", "/bin/bash", "--name", instance_id],
-            stdin=subprocess.DEVNULL, stdout=out, stderr=err,
-            start_new_session=True, cwd="/home/noir",
+            ["/usr/local/bin/sshx", "--quiet", "--shell", shell, "--name", instance_id],
+            stdin=subprocess.DEVNULL,
+            stdout=out,
+            stderr=err,
+            close_fds=True,
+            start_new_session=True,
+            cwd=home_dir,
             env={
                 **os.environ,
-                "HOME": "/home/noir",
+                "HOME": home_dir,
                 "USER": "root",
                 "LOGNAME": "root",
-                "SHELL": "/bin/bash",
+                "SHELL": shell,
                 "RUST_LOG": "error",
             },
         )
@@ -77,25 +119,35 @@ def stop() -> None:
             pass
 
 
+def read_url() -> None:
+    pid = read_pid()
+    url = find_url()
+    if pid > 1 and alive(pid) and url:
+        sys.stdout.write(url)
+        return
+    if pid > 1 and not alive(pid):
+        err_tail = ""
+        if os.path.exists(ERR):
+            raw = _strip_ansi(open(ERR, errors="replace").read(4096))
+            err_tail = " ".join(raw.split())[-200:]
+        sys.stderr.write(f"EXIT:{err_tail}\n")
+        raise SystemExit(2)
+    raise SystemExit(1)
+
+
 def main() -> None:
     os.umask(0o077)
     os.makedirs(DIR, mode=0o700, exist_ok=True)
+    action = sys.argv[1] if len(sys.argv) > 1 else ""
+    if action == "url":
+        read_url()
+        return
     with open(DIR + "/lock", "a", opener=lambda p, f: os.open(p, f, 0o600)) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        action = sys.argv[1] if len(sys.argv) > 1 else ""
         if action == "start" and len(sys.argv) == 3:
             start(sys.argv[2])
         elif action == "stop":
             stop()
-        elif action == "url":
-            pid = read_pid()
-            if pid > 1 and alive(pid) and os.path.exists(URL):
-                with open(URL) as handle:
-                    value = handle.read(1025)
-                if VALID_URL.fullmatch(value):
-                    sys.stdout.write(value.strip())
-                    return
-            raise SystemExit(1)
         else:
             raise SystemExit(2)
 

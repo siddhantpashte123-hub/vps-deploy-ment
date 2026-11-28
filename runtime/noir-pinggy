@@ -1,6 +1,7 @@
 #!/usr/bin/python3
 """Start OpenSSH sshd + a Pinggy TCP/HTTP tunnel inside the VPS container."""
 import fcntl
+import json
 import os
 import pty
 import re
@@ -9,26 +10,33 @@ import select
 import signal
 import socket
 import string
+import struct
 import subprocess
 import sys
+import termios
 import time
+import urllib.request
 
 DIR = "/tmp/noir-pinggy"
 PID_FILE = DIR + "/pinggy.pid"
 OUT_FILE = DIR + "/pinggy.out"
+DBG_FILE = DIR + "/pinggy.dbg"
 PASS_FILE = DIR + "/root.pass"
 KEY_FILE = DIR + "/tunnel_key"
 HTTP_PID_PREFIX = DIR + "/http-"
 HTTP_OUT_PREFIX = DIR + "/http-"
+HTTP_DBG_PREFIX = DIR + "/http-"
 
 VALID_ID = re.compile(r"(?:noir|fier)-[a-f0-9]{12}\Z")
-TCP_URL_RE = re.compile(
-    r"tcp://([A-Za-z0-9.-]+\.(?:pinggy\.link|pinggy\.online|pinggy\.io)):([0-9]{2,5})"
-)
-HTTPS_URL_RE = re.compile(
-    r"https://[A-Za-z0-9.-]+\.(?:pinggy\.link|pinggy\.online|pinggy\.io)"
-)
-ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[A-Za-z]|\][^\x07]*\x07|[()][A-Za-z0-9])")
+# Match current and legacy Pinggy domains (including *.run.pinggy-free.link,
+# *.free.pinggy.net, *.a.free.pinggy.link, *.a.free.pinggy.online, *.pinggy.io)
+TCP_URL_RE = re.compile(r"tcp://([A-Za-z0-9.-]*pinggy[A-Za-z0-9.-]*):([0-9]{2,5})")
+HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9.-]*pinggy[A-Za-z0-9.-]*")
+ANSI_RE = re.compile(r"\x1b(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))")
+
+
+def _strip_ansi(text: str) -> str:
+    return ANSI_RE.sub("", text).replace("\x00", "")
 
 
 def _alive(pid: int) -> bool:
@@ -41,7 +49,6 @@ def _alive(pid: int) -> bool:
     try:
         with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as handle:
             stat_txt = handle.read()
-        # Reject zombie processes ("... ) Z ...")
         rparen = stat_txt.rfind(")")
         if rparen != -1 and stat_txt[rparen + 2 : rparen + 3] == "Z":
             return False
@@ -60,12 +67,34 @@ def _read_int(path: str) -> int:
         return 0
 
 
+def _pick_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
 def _port_listening(port: int) -> bool:
     try:
         with socket.create_connection(("127.0.0.1", port), timeout=0.5):
             return True
     except OSError:
         return False
+
+
+def _query_debugger_urls(dbg_port: int) -> list[str]:
+    if dbg_port <= 0:
+        return []
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{dbg_port}/urls", timeout=0.8
+        ) as resp:
+            payload = json.loads(resp.read(8192).decode("utf-8", "replace"))
+        urls = payload.get("urls")
+        if isinstance(urls, list):
+            return [str(u).strip() for u in urls if isinstance(u, str)]
+    except Exception:
+        pass
+    return []
 
 
 def _ensure_tunnel_key() -> str:
@@ -95,7 +124,15 @@ def _ensure_openssh_server() -> None:
             check=False,
         )
         subprocess.run(
-            ["apt-get", "install", "-y", "-qq", "--no-install-recommends", "openssh-server"],
+            [
+                "apt-get",
+                "install",
+                "-y",
+                "-qq",
+                "--no-install-recommends",
+                "openssh-server",
+                "openssh-client",
+            ],
             env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -104,7 +141,7 @@ def _ensure_openssh_server() -> None:
         )
     elif os.path.exists("/sbin/apk"):
         subprocess.run(
-            ["apk", "add", "--no-cache", "-q", "openssh-server", "shadow"],
+            ["apk", "add", "--no-cache", "openssh-server", "openssh-client"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=90,
@@ -112,22 +149,11 @@ def _ensure_openssh_server() -> None:
         )
 
 
-def _unlock_root_account() -> None:
-    """Alpine locks root (`root:!`) by default, which rejects SSH password login."""
-    subprocess.run(
-        ["passwd", "-u", "root"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
-
-
 def _ensure_sshd() -> str:
     _ensure_openssh_server()
     if not os.path.exists("/usr/sbin/sshd"):
-        sys.stderr.write("openssh-server is missing inside the container.\n")
+        sys.stderr.write("openssh-server is not installed inside this VPS.\n")
         raise SystemExit(3)
-
     os.makedirs("/run/sshd", mode=0o755, exist_ok=True)
     os.makedirs("/var/run/sshd", mode=0o755, exist_ok=True)
     os.makedirs("/etc/ssh/sshd_config.d", mode=0o755, exist_ok=True)
@@ -137,45 +163,19 @@ def _ensure_sshd() -> str:
         stderr=subprocess.DEVNULL,
         check=False,
     )
-
-    cfg_line = (
-        "PermitRootLogin yes\n"
-        "PasswordAuthentication yes\n"
-        "KbdInteractiveAuthentication yes\n"
-        "PubkeyAuthentication yes\n"
-        "Subsystem sftp internal-sftp\n"
-    )
-    # Put override in sshd_config.d/00-noir.conf (Ubuntu/Debian Include it at top, first-match wins)
-    dropin = "/etc/ssh/sshd_config.d/00-noir.conf"
-    try:
-        with open(dropin, "w") as handle:
-            handle.write(cfg_line)
-    except OSError:
-        pass
-
-    main_cfg = "/etc/ssh/sshd_config"
-    marker = "# NOIR_ROOT_SSH"
-    try:
-        existing = open(main_cfg).read() if os.path.exists(main_cfg) else ""
-    except OSError:
-        existing = ""
-    if marker not in existing:
-        # Comment out conflicting UsePAM yes in containers lacking PAM limits
-        patched = re.sub(r"(?m)^\s*UsePAM\s+yes\b", "UsePAM no", existing)
-        with open(main_cfg, "w") as handle:
-            handle.write(f"{patched}\n{marker}\nUsePAM no\n{cfg_line}")
-
     password = ""
     if os.path.exists(PASS_FILE):
         try:
             password = open(PASS_FILE).read().strip()
         except OSError:
             password = ""
-    if not password:
+    if len(password) < 12:
         alphabet = string.ascii_letters + string.digits
-        password = "".join(secrets.choice(alphabet) for _ in range(14))
+        password = "".join(secrets.choice(alphabet) for _ in range(16))
         with open(PASS_FILE, "w", opener=lambda p, f: os.open(p, f, 0o600)) as handle:
-            handle.write(password)
+            handle.write(password + "\n")
+    # Ensure root account is unlocked and has the generated password set
+    subprocess.run(["passwd", "-u", "root"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     chpasswd = subprocess.Popen(
         ["chpasswd"],
         stdin=subprocess.PIPE,
@@ -183,19 +183,42 @@ def _ensure_sshd() -> str:
         stderr=subprocess.DEVNULL,
     )
     chpasswd.communicate(f"root:{password}\n".encode())
-    _unlock_root_account()
 
+    # Guarantee PermitRootLogin yes + PasswordAuthentication yes
+    conf_line = (
+        "\n# NOIR managed root SSH\n"
+        "PermitRootLogin yes\n"
+        "PasswordAuthentication yes\n"
+        "PubkeyAuthentication yes\n"
+        "UsePAM no\n"
+    )
+    drop_in = "/etc/ssh/sshd_config.d/99-noir.conf"
+    with open(drop_in, "w") as handle:
+        handle.write(conf_line)
+    main_cfg = "/etc/ssh/sshd_config"
+    if os.path.exists(main_cfg):
+        txt = open(main_cfg, errors="replace").read()
+        if "99-noir.conf" not in txt and "sshd_config.d" not in txt:
+            with open(main_cfg, "a") as handle:
+                handle.write(conf_line)
     if not _port_listening(22):
-        devnull = os.open(os.devnull, os.O_RDWR)
         subprocess.Popen(
-            ["/usr/sbin/sshd"],
-            stdin=devnull,
-            stdout=devnull,
-            stderr=devnull,
-            close_fds=True,
+            [
+                "/usr/sbin/sshd",
+                "-o",
+                "PermitRootLogin=yes",
+                "-o",
+                "PasswordAuthentication=yes",
+                "-o",
+                "PubkeyAuthentication=yes",
+                "-o",
+                "UsePAM=no",
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             start_new_session=True,
         )
-        os.close(devnull)
         for _ in range(25):
             if _port_listening(22):
                 break
@@ -206,14 +229,20 @@ def _ensure_sshd() -> str:
     return password
 
 
-def _spawn_pinggy_pty(remote_spec: str, target_dest: str, out_path: str, pid_path: str) -> None:
+def _spawn_pinggy_tunnel(
+    remote_spec: str, target_dest: str, out_path: str, pid_path: str, dbg_path: str
+) -> None:
     key_path = _ensure_tunnel_key()
-    for p in (out_path, pid_path):
+    dbg_port = _pick_free_port()
+    for p in (out_path, pid_path, dbg_path):
         try:
             os.unlink(p)
         except FileNotFoundError:
             pass
-    # Double-fork daemon + close inherited Docker exec pipes so `docker exec` returns immediately
+    with open(dbg_path, "w", opener=lambda p, f: os.open(p, f, 0o600)) as handle:
+        handle.write(str(dbg_port))
+
+    # Double-fork daemon + close inherited FDs (including lock FD & Docker exec pipes)
     pid = os.fork()
     if pid > 0:
         os.waitpid(pid, 0)
@@ -238,12 +267,20 @@ def _spawn_pinggy_pty(remote_spec: str, target_dest: str, out_path: str, pid_pat
     os.closerange(3, min(max_fd, 4096))
 
     master_fd, slave_fd = pty.openpty()
+    # Set a standard 40x160 terminal window size so Pinggy never wraps URLs or hangs on 0x0 PTY
+    try:
+        winsz = struct.pack("HHHH", 40, 160, 0, 0)
+        fcntl.ioctl(slave_fd, termios.TIOCSWINSZ, winsz)
+    except OSError:
+        pass
+
     ssh_bin = "/usr/bin/ssh" if os.path.exists("/usr/bin/ssh") else "ssh"
+    # Use -T (non-TUI plain text output) + -L 127.0.0.1:<dbg_port>:localhost:4300 (JSON /urls API)
     cmd = [
         ssh_bin,
         "-p",
         "443",
-        "-t",
+        "-T",
         "-i",
         key_path,
         "-o",
@@ -259,9 +296,10 @@ def _spawn_pinggy_pty(remote_spec: str, target_dest: str, out_path: str, pid_pat
         "-o",
         "ConnectTimeout=15",
         "-o",
-        "ExitOnForwardFailure=yes",
+        "ExitOnForwardFailure=no",
         "-o",
         "LogLevel=ERROR",
+        f"-L127.0.0.1:{dbg_port}:localhost:4300",
         remote_spec,
         target_dest,
     ]
@@ -272,7 +310,7 @@ def _spawn_pinggy_pty(remote_spec: str, target_dest: str, out_path: str, pid_pat
         stderr=slave_fd,
         close_fds=True,
         start_new_session=True,
-        env={**os.environ, "HOME": "/home/noir", "TERM": "xterm"},
+        env={**os.environ, "HOME": "/home/noir", "TERM": "dumb"},
     )
     os.close(slave_fd)
     answered_pw = False
@@ -290,6 +328,12 @@ def _spawn_pinggy_pty(remote_spec: str, target_dest: str, out_path: str, pid_pat
                     break
                 sink.write(chunk)
                 sink.flush()
+                # Answer cursor-position query (DSR \x1b[6n) if ever sent
+                if b"\x1b[6n" in chunk:
+                    try:
+                        os.write(master_fd, b"\x1b[1;1R")
+                    except OSError:
+                        pass
                 if not answered_pw and b"assword:" in chunk:
                     try:
                         os.write(master_fd, b"\n")
@@ -297,6 +341,19 @@ def _spawn_pinggy_pty(remote_spec: str, target_dest: str, out_path: str, pid_pat
                     except OSError:
                         pass
         finally:
+            # Drain any trailing output if ssh exited quickly
+            while True:
+                rlist, _, _ = select.select([master_fd], [], [], 0.05)
+                if not rlist:
+                    break
+                try:
+                    tail_chunk = os.read(master_fd, 2048)
+                except OSError:
+                    break
+                if not tail_chunk:
+                    break
+                sink.write(tail_chunk)
+                sink.flush()
             try:
                 os.close(master_fd)
             except OSError:
@@ -309,7 +366,7 @@ def _spawn_pinggy_pty(remote_spec: str, target_dest: str, out_path: str, pid_pat
     os._exit(0)
 
 
-def _kill_daemon(pid_path: str, out_path: str) -> None:
+def _kill_daemon(pid_path: str, out_path: str, dbg_path: str = "") -> None:
     pid = _read_int(pid_path)
     if pid > 1:
         try:
@@ -320,11 +377,38 @@ def _kill_daemon(pid_path: str, out_path: str) -> None:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-    for p in (pid_path, out_path):
+    for p in (pid_path, out_path, dbg_path):
+        if not p:
+            continue
         try:
             os.unlink(p)
         except FileNotFoundError:
             pass
+
+
+def _extract_tcp_endpoint(dbg_path: str, out_path: str) -> tuple[str, str] | None:
+    for url in _query_debugger_urls(_read_int(dbg_path)):
+        m = TCP_URL_RE.search(url)
+        if m:
+            return m.group(1), m.group(2)
+    if os.path.exists(out_path):
+        raw = _strip_ansi(open(out_path, errors="replace").read(32768))
+        m = TCP_URL_RE.search(raw)
+        if m:
+            return m.group(1), m.group(2)
+    return None
+
+
+def _extract_https_url(dbg_path: str, out_path: str) -> str | None:
+    for url in _query_debugger_urls(_read_int(dbg_path)):
+        if url.startswith("https://"):
+            return url
+    if os.path.exists(out_path):
+        raw = _strip_ansi(open(out_path, errors="replace").read(32768))
+        m = HTTPS_URL_RE.search(raw)
+        if m:
+            return m.group(0)
+    return None
 
 
 def start_ssh(instance_id: str) -> None:
@@ -332,27 +416,31 @@ def start_ssh(instance_id: str) -> None:
         raise SystemExit(1)
     _ensure_sshd()
     pid = _read_int(PID_FILE)
-    if pid > 1 and _alive(pid) and os.path.exists(OUT_FILE):
-        raw = ANSI_RE.sub("", open(OUT_FILE, errors="replace").read(16384))
-        if TCP_URL_RE.search(raw):
-            return
-    _kill_daemon(PID_FILE, OUT_FILE)
-    _spawn_pinggy_pty("-R0:127.0.0.1:22", "tcp@free.pinggy.io", OUT_FILE, PID_FILE)
+    if pid > 1 and _alive(pid) and _extract_tcp_endpoint(DBG_FILE, OUT_FILE):
+        return
+    _kill_daemon(PID_FILE, OUT_FILE, DBG_FILE)
+    _spawn_pinggy_tunnel("-R0:127.0.0.1:22", "tcp@free.pinggy.io", OUT_FILE, PID_FILE, DBG_FILE)
 
 
 def read_ssh_info() -> None:
-    if not os.path.exists(OUT_FILE) or not os.path.exists(PASS_FILE):
+    if not os.path.exists(PASS_FILE):
         raise SystemExit(1)
-    raw = ANSI_RE.sub("", open(OUT_FILE, errors="replace").read(32768))
-    match = TCP_URL_RE.search(raw)
-    if not match:
+    endpoint = _extract_tcp_endpoint(DBG_FILE, OUT_FILE)
+    if endpoint is None:
+        raw = (
+            _strip_ansi(open(OUT_FILE, errors="replace").read(32768))
+            if os.path.exists(OUT_FILE)
+            else ""
+        )
+        tail = " ".join(raw.split())[-200:]
         pid = _read_int(PID_FILE)
         if pid > 1 and not _alive(pid):
-            tail = " ".join(raw.split())[-200:]
             sys.stderr.write(f"EXIT:{tail}\n")
             raise SystemExit(2)
+        if tail:
+            sys.stderr.write(f"WAIT:{tail}\n")
         raise SystemExit(1)
-    host, port = match.group(1), match.group(2)
+    host, port = endpoint
     password = open(PASS_FILE).read().strip()
     sys.stdout.write(f"{host}\n{port}\n{password}\n")
 
@@ -365,31 +453,35 @@ def start_http(instance_id: str, port_raw: str) -> None:
         raise SystemExit(1)
     pid_path = f"{HTTP_PID_PREFIX}{port}.pid"
     out_path = f"{HTTP_OUT_PREFIX}{port}.out"
+    dbg_path = f"{HTTP_DBG_PREFIX}{port}.dbg"
     pid = _read_int(pid_path)
-    if pid > 1 and _alive(pid) and os.path.exists(out_path):
-        raw = ANSI_RE.sub("", open(out_path, errors="replace").read(16384))
-        if HTTPS_URL_RE.search(raw):
-            return
-    _kill_daemon(pid_path, out_path)
-    _spawn_pinggy_pty(f"-R0:127.0.0.1:{port}", "free.pinggy.io", out_path, pid_path)
+    if pid > 1 and _alive(pid) and _extract_https_url(dbg_path, out_path):
+        return
+    _kill_daemon(pid_path, out_path, dbg_path)
+    _spawn_pinggy_tunnel(f"-R0:127.0.0.1:{port}", "free.pinggy.io", out_path, pid_path, dbg_path)
 
 
 def read_http_url(port_raw: str) -> None:
     port = int(port_raw)
     out_path = f"{HTTP_OUT_PREFIX}{port}.out"
     pid_path = f"{HTTP_PID_PREFIX}{port}.pid"
-    if not os.path.exists(out_path):
-        raise SystemExit(1)
-    raw = ANSI_RE.sub("", open(out_path, errors="replace").read(32768))
-    match = HTTPS_URL_RE.search(raw)
-    if not match:
+    dbg_path = f"{HTTP_DBG_PREFIX}{port}.dbg"
+    url = _extract_https_url(dbg_path, out_path)
+    if not url:
+        raw = (
+            _strip_ansi(open(out_path, errors="replace").read(32768))
+            if os.path.exists(out_path)
+            else ""
+        )
+        tail = " ".join(raw.split())[-200:]
         pid = _read_int(pid_path)
         if pid > 1 and not _alive(pid):
-            tail = " ".join(raw.split())[-200:]
             sys.stderr.write(f"EXIT:{tail}\n")
             raise SystemExit(2)
+        if tail:
+            sys.stderr.write(f"WAIT:{tail}\n")
         raise SystemExit(1)
-    sys.stdout.write(match.group(0))
+    sys.stdout.write(url)
 
 
 def main() -> None:
@@ -407,12 +499,16 @@ def main() -> None:
         if action == "start" and len(sys.argv) == 3:
             start_ssh(sys.argv[2])
         elif action == "stop":
-            _kill_daemon(PID_FILE, OUT_FILE)
+            _kill_daemon(PID_FILE, OUT_FILE, DBG_FILE)
         elif action == "http-start" and len(sys.argv) == 4:
             start_http(sys.argv[2], sys.argv[3])
         elif action == "http-stop" and len(sys.argv) == 3:
             port = int(sys.argv[2])
-            _kill_daemon(f"{HTTP_PID_PREFIX}{port}.pid", f"{HTTP_OUT_PREFIX}{port}.out")
+            _kill_daemon(
+                f"{HTTP_PID_PREFIX}{port}.pid",
+                f"{HTTP_OUT_PREFIX}{port}.out",
+                f"{HTTP_DBG_PREFIX}{port}.dbg",
+            )
         else:
             raise SystemExit(2)
 
