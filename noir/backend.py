@@ -429,6 +429,9 @@ class DockerBackend:
     def restore_home(self, instance_id: str) -> None:
         self._helper("restore", instance_id)
 
+    def delete_backup(self, instance_id: str) -> None:
+        self._helper("delete-backup", instance_id)
+
     def remove_all(self, instance_id: str) -> None:
         container = self.get(instance_id)
         if container is not None:
